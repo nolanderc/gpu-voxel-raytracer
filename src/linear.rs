@@ -1,4 +1,4 @@
-use std::ops::{Add, AddAssign, Div, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Div, Index, IndexMut, Mul, Neg, Sub, SubAssign};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -78,9 +78,23 @@ macro_rules! impl_vector {
     ($vector:ident { $($field:ident),* }) => {
         impl $vector {
             #[inline(always)]
-            pub fn new($($field:f32),*) -> $vector {
+            pub const fn new($($field:f32),*) -> $vector {
                 $vector {
                     $( $field ),*
+                }
+            }
+
+            #[inline(always)]
+            pub const fn zero() -> $vector {
+                $vector {
+                    $( $field: 0.0 ),*
+                }
+            }
+
+            #[inline(always)]
+            pub const fn one() -> $vector {
+                $vector {
+                    $( $field: 1.0 ),*
                 }
             }
 
@@ -143,6 +157,11 @@ macro_rules! impl_vector {
             #[inline(always)]
             pub fn max(self) -> f32 {
                 sequence_binary!(f32::max, [$(self.$field),*])
+            }
+
+            #[inline(always)]
+            pub fn reflect(self, normal: $vector) -> $vector {
+                self - 2.0 * self.dot(normal) * normal
             }
         }
 
