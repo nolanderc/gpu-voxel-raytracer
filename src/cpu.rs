@@ -61,9 +61,9 @@ impl Backend for CpuBackend {
                     let shadow = 0.4 + 0.6 * !in_shadow as u8 as f32;
                     let brightness = 0.0 + shadow * light_dir.dot(hit.normal).max(0.0) * attenuation;
 
-                    let r = hit.value.r * brightness;
-                    let g = hit.value.g * brightness;
-                    let b = hit.value.b * brightness;
+                    let r = (hit.value.r as f32 * brightness).round() as u8;
+                    let g = (hit.value.g as f32 * brightness).round() as u8;
+                    let b = (hit.value.b as f32 * brightness).round() as u8;
                     Color { r, g, b }
                 } else {
                     Color::BLACK

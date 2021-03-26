@@ -39,10 +39,16 @@ pub(crate) struct RayHit<'a, T> {
     pub time: f32,
 }
 
-#[derive(PartialEq, PartialOrd)]
+#[derive(PartialEq)]
 struct Ordered(f32);
 
 impl Eq for Ordered {}
+
+impl PartialOrd for Ordered {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
 
 impl Ord for Ordered {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -213,7 +219,7 @@ impl<T: std::fmt::Debug> Octree<T> {
 
                     let child_size = size / 2.0;
                     let child_center = Self::child_octant_center(center, child_size, octant);
-                    match Self::cast_ray_children(
+                    if let Some(hit) = Self::cast_ray_children(
                         children,
                         ray,
                         child_center,
@@ -222,8 +228,7 @@ impl<T: std::fmt::Debug> Octree<T> {
                         exit,
                         plane,
                     ) {
-                        Some(hit) => return Some(hit),
-                        None => {}
+                        return Some(hit);
                     }
                 }
                 Some(OctreeNode::Leaf(value)) => {
