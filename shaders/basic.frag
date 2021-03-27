@@ -149,9 +149,7 @@ void main() {
 
 
     int value = 0;
-    int iterations = 0;
     while (stack_size > 0) {
-        iterations += 1;
         int c = stack_size - 1;
         int i = stack[c].stage++;
         if (i >= stack[c].intersections.count) {
@@ -185,9 +183,6 @@ void main() {
         stack[stack_size] = Frame(child, 0, child_center, child_size, child_intersections);
         stack_size++;
     }
-
-    out_color = vec4(iterations / 255.0);
-    return;
 
     if (stack_size == 0) {
         out_color = vec4(abs(ray_dir), 1);
