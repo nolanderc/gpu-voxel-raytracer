@@ -12,7 +12,7 @@ use std::sync::Arc;
 pub(crate) struct Context {
     window: Arc<winit::window::Window>,
 
-    gpu: Arc<GpuContext>,
+    gpu: GpuContext,
     swap_chain: wgpu::SwapChain,
     output_size: crate::Size,
     pipeline: wgpu::RenderPipeline,
@@ -27,7 +27,7 @@ pub(crate) struct GpuContext {
     pub instance: wgpu::Instance,
     pub surface: wgpu::Surface,
     pub adapter: wgpu::Adapter,
-    pub device: wgpu::Device,
+    pub device: Arc<wgpu::Device>,
     pub queue: wgpu::Queue,
 }
 
@@ -74,9 +74,9 @@ impl Context {
 
         // poll the device in a background thread: enables mapping of buffers
         std::thread::spawn({
-            let gpu = gpu.clone();
+            let device = gpu.device.clone();
             move || loop {
-                gpu.device.poll(wgpu::Maintain::Wait)
+                device.poll(wgpu::Maintain::Wait)
             }
         });
 
@@ -108,10 +108,10 @@ impl Context {
 
     pub const SWAP_CHAIN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
-    async fn create_gpu_context(window: &winit::window::Window) -> anyhow::Result<Arc<GpuContext>> {
+    async fn create_gpu_context(window: &winit::window::Window) -> anyhow::Result<GpuContext> {
         let backends = wgpu::BackendBit::PRIMARY;
         let instance = wgpu::Instance::new(backends);
-        let surface = unsafe { instance.create_surface(window) };
+        let surface = Self::create_surface(&instance, &window);
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -125,13 +125,17 @@ impl Context {
             .await
             .context("failed to find device")?;
 
-        Ok(Arc::new(GpuContext {
+        Ok(GpuContext {
             instance,
             surface,
             adapter,
-            device,
+            device: Arc::new(device),
             queue,
-        }))
+        })
+    }
+
+    fn create_surface(instance: &wgpu::Instance, window: &winit::window::Window) -> wgpu::Surface {
+        unsafe { instance.create_surface(window) }
     }
 
     fn create_swap_chain(gpu: &GpuContext, size: crate::Size) -> wgpu::SwapChain {
@@ -140,7 +144,7 @@ impl Context {
             format: Self::SWAP_CHAIN_FORMAT,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Mailbox,
+            present_mode: wgpu::PresentMode::Fifo,
         };
 
         gpu.device.create_swap_chain(&gpu.surface, &descriptor)
@@ -416,13 +420,21 @@ impl Context {
     }
 
     fn get_next_frame(&mut self) -> anyhow::Result<wgpu::SwapChainTexture> {
-        loop {
+        for _attempt in 0..8 {
             match self.swap_chain.get_current_frame() {
+                Err(wgpu::SwapChainError::Outdated) => {
+                    let _ = info_span!("swap chain outdated");
+                    info!("recreating surface");
+                    self.gpu.surface = Self::create_surface(&self.gpu.instance, &self.window);
+                    info!("recreating swap chain");
+                    self.swap_chain = Self::create_swap_chain(&self.gpu, self.output_size);
+                }
                 Ok(wgpu::SwapChainFrame {
                     suboptimal: true, ..
                 })
-                | Err(wgpu::SwapChainError::Outdated)
                 | Err(wgpu::SwapChainError::Lost) => {
+                    let _ = info_span!("swap chain lost");
+                    info!("recreating swap chain");
                     self.swap_chain = Self::create_swap_chain(&self.gpu, self.output_size);
                 }
                 Ok(frame) => return Ok(frame.output),
@@ -433,6 +445,8 @@ impl Context {
                 }
             }
         }
+
+        panic!("failed to fetch next frame in swap chain");
     }
 
     fn update_bindings(&mut self) {
