@@ -139,7 +139,7 @@ impl Context {
             usage: wgpu::TextureUsage::RENDER_ATTACHMENT,
             format: Self::SWAP_CHAIN_FORMAT,
             width: size.width,
-            height: size.width,
+            height: size.height,
             present_mode: wgpu::PresentMode::Mailbox,
         };
 
