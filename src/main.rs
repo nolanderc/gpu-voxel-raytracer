@@ -14,6 +14,8 @@ use crate::camera::Camera;
 use crate::color::Color;
 use crate::linear::Vec3;
 
+use std::sync::Arc;
+
 trait Backend {
     fn from_voxels(voxels: Vec<(Coord, Color)>) -> Self;
 
@@ -50,8 +52,9 @@ fn main() -> anyhow::Result<()> {
         .with_inner_size(size)
         .build(&event_loop)
         .expect("could not open window");
+    let window = Arc::new(window);
 
-    let mut context = pollster::block_on(crate::context::Context::new(&window))?;
+    let mut context = pollster::block_on(crate::context::Context::new(window))?;
     
     event_loop.run(move |event, _, flow| {
         if let Err(e) = context.handle_event(event, flow) {

@@ -10,6 +10,8 @@ use anyhow::Context as _;
 use std::sync::Arc;
 
 pub(crate) struct Context {
+    window: Arc<winit::window::Window>,
+
     gpu: Arc<GpuContext>,
     swap_chain: wgpu::SwapChain,
     output_size: crate::Size,
@@ -67,8 +69,8 @@ struct Uniforms {
 
 // Context creation
 impl Context {
-    pub async fn new(window: &winit::window::Window) -> anyhow::Result<Context> {
-        let gpu = Self::create_gpu_context(window).await?;
+    pub async fn new(window: Arc<winit::window::Window>) -> anyhow::Result<Context> {
+        let gpu = Self::create_gpu_context(&window).await?;
 
         // poll the device in a background thread: enables mapping of buffers
         std::thread::spawn({
@@ -90,6 +92,8 @@ impl Context {
         };
 
         Ok(Context {
+            window,
+
             gpu,
             swap_chain,
             output_size,
@@ -199,7 +203,7 @@ impl Context {
                 .max(y.abs() as u16)
                 .max(z.abs() as u16);
         }
-        let extent = dbg!(extent.next_power_of_two());
+        let extent = extent.next_power_of_two();
 
         let mut nodes = Vec::new();
         let root = alloc_node(&mut nodes);
@@ -218,7 +222,7 @@ impl Context {
 
         for x in -r..=r {
             for z in -r..=r {
-                let d = r*r - (x*x + z*z);
+                let d = r * r - (x * x + z * z);
                 if d >= 0 {
                     let y = f32::sqrt(d as f32) as i16;
                     voxels.push(([x, y, z], [50, 150, 50]));
@@ -245,7 +249,7 @@ impl Context {
 
         let nodes = Self::create_octree_nodes(Self::create_voxels());
 
-        octree.extend(dbg!(nodes));
+        octree.extend(nodes);
 
         let octree_buffer = Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &octree);
 
@@ -342,7 +346,12 @@ impl Context {
 
         match event {
             Event::MainEventsCleared => {
+                let render_time = std::time::Instant::now();
                 pollster::block_on(self.render()).context("failed to render frame")?;
+                println!(
+                    "render: {} ms",
+                    render_time.elapsed().as_secs_f32() * 1000.0
+                );
             }
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => {
@@ -408,15 +417,20 @@ impl Context {
 
     fn get_next_frame(&mut self) -> anyhow::Result<wgpu::SwapChainTexture> {
         loop {
-            let frame = self
-                .swap_chain
-                .get_current_frame()
-                .context("could not get next frame in swap chain")?;
-
-            if frame.suboptimal {
-                self.swap_chain = Self::create_swap_chain(&self.gpu, self.output_size);
-            } else {
-                return Ok(frame.output);
+            match self.swap_chain.get_current_frame() {
+                Ok(wgpu::SwapChainFrame {
+                    suboptimal: true, ..
+                })
+                | Err(wgpu::SwapChainError::Outdated)
+                | Err(wgpu::SwapChainError::Lost) => {
+                    self.swap_chain = Self::create_swap_chain(&self.gpu, self.output_size);
+                }
+                Ok(frame) => return Ok(frame.output),
+                Err(e) => {
+                    return Err(e)
+                        .context("could not get next frame in swap chain")
+                        .into()
+                }
             }
         }
     }
