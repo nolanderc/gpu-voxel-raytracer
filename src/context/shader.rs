@@ -35,7 +35,7 @@ fn load_shader_binary(source_path: &Path) -> anyhow::Result<Vec<u32>> {
 
     if should_rebuild(source_path, binary_path) {
         info!(shader = %source_path.display(), "rebuilding shader");
-        compile_shader(source_path, binary_path).context("shader build error")?;
+        compile_shader(source_path, binary_path).context("failed to rebuild shader from source")?;
     }
 
     let bytes: Vec<u8> = std::fs::read(binary_path)?;
