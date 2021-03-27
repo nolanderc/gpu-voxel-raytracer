@@ -222,15 +222,20 @@ impl Context {
     fn create_voxels() -> Vec<([i16; 3], [u8; 3])> {
         let mut voxels = Vec::new();
 
-        let r = 32;
+        let r = 32i32;
 
         for x in -r..=r {
-            for z in -r..=r {
-                let d = r * r - (x * x + z * z);
-                if d >= 0 {
-                    let y = f32::sqrt(d as f32) as i16;
-                    voxels.push(([x, y, z], [50, 150, 50]));
-                    voxels.push(([x, -y, z], [50, 150, 50]));
+            for y in -r..=r {
+                for z in -r..=r {
+                    let d = r * r - (x * x + y*y + z * z);
+                    if 0 <= d && d <= r {
+                        let x = x as i16;
+                        let y = y as i16;
+                        let z = z as i16;
+
+                        voxels.push(([x, y, z], [50, 150, 50]));
+                        voxels.push(([x, -y, z], [50, 150, 50]));
+                    }
                 }
             }
         }
