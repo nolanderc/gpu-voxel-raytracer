@@ -9,6 +9,7 @@ layout(binding = 0) uniform uniforms {
     vec4 camera_right;
     vec4 camera_up;
     vec4 camera_forward;
+    vec4 light;
     float time;
 };
 
@@ -59,7 +60,7 @@ uint get_octant(uint octants, int octant_index) {
 
 // (1 <= count <= 4, so we store 0 <= count - 1 <= 3 using 2 bits)
 void insert_count(inout uint octants, uint count) {
-    octants |= count - 1;
+    octants = bitfieldInsert(octants, count - 1, 0, 2);
 }
 
 uint get_count(uint octants) {
@@ -92,7 +93,10 @@ void octant_intersections(
 
     vec3 entries = vec3(plane_entries[order[0]], plane_entries[order[1]], plane_entries[order[2]]);
 
-    uint octant = (delta.x < 0 ? 4 : 0) | (delta.y < 0 ? 2 : 0) | (delta.z < 0 ? 1 : 0);
+    uint dx = (delta.x < 0 || (!(delta.x > 0) && inv_dir.x < 0)) ? 4 : 0;
+    uint dy = (delta.y < 0 || (!(delta.y > 0) && inv_dir.y < 0)) ? 2 : 0;
+    uint dz = (delta.z < 0 || (!(delta.z > 0) && inv_dir.z < 0)) ? 1 : 0;
+    uint octant = dx + dy + dz;
     float prev_time = entry;
 
     int count = 0;
@@ -248,14 +252,17 @@ void main() {
     bool hit = cast_ray(ray_origin, ray_dir, time, color, normal);
 
     if (hit) {
-        const vec3 LIGHT_DIR = normalize(vec3(1, -3, 2));
+        vec3 hit_point = ray_origin + ray_dir * (0.99999 * time);
+
+        vec3 light_dir = normalize(hit_point - light.xyz);
 
         float shadow_time;
         vec3 shadow_color, shadow_normal;
-        vec3 hit_point = ray_origin + ray_dir * (0.9999 * time);
-        bool shadow = cast_ray(hit_point, -LIGHT_DIR, shadow_time, shadow_color, shadow_normal);
+        bool obstructed = cast_ray(hit_point, -light_dir, shadow_time, shadow_color, shadow_normal);
+        float light_distance = distance(hit_point, light.xyz);
+        bool shadow = obstructed && shadow_time <= light_distance;
 
-        float diffuse = 0.8 * max(0.0, dot(-LIGHT_DIR, normal));
+        float diffuse = 0.8 * light.w * max(0.0, dot(-light_dir, normal)) / pow(light_distance, 2);
         float brightness = 0.2 + (shadow ? 0.3 * diffuse : diffuse);
         out_color = vec4(color * brightness, 1);
     } else {

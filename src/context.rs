@@ -65,7 +65,15 @@ struct Uniforms {
     camera_right: Vec3A,
     camera_up: Vec3A,
     camera_forward: Vec3A,
+    light: PointLight,
     time: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct PointLight {
+    position: Vec3,
+    brightness: f32,
 }
 
 struct FpsCounter {
@@ -115,8 +123,8 @@ impl Context {
         let pipeline = Self::create_render_pipeline(&gpu, &bindings)?;
 
         let camera = crate::camera::Camera {
-            position: Vec3::zero(),
-            direction: Vec3::zero(),
+            position: Vec3::new(0.0, 0.8, -1.0),
+            direction: Vec3::new(0.0, -0.8, 1.0),
             fov: 70.0f32.to_radians(),
         };
 
@@ -254,23 +262,32 @@ impl Context {
 
         let r = 32i32;
 
+        let color = |x: i32, y: i32, z: i32| {
+            let red = 50 + ((200 / 7) * ((x + z) % 8)).abs() as u8;
+            let green = 50 + ((200 / r) * y).abs() as u8;
+            let blue = 50 + ((200 / 4) * ((x * z + 2 * y - 3 * x + z) % 5)).abs() as u8;
+            [red, green, blue]
+        };
+
         for x in -r..=r {
             for y in -r..0 {
                 for z in -r..=r {
                     let d = r * r - (x * x + y * y + z * z);
                     if 0 <= d && d <= 2*r {
-                        let red = 50 + ((200 / 7) * ((x + z) % 8)).abs() as u8;
-                        let green = 50 + ((200 / r) * y).abs() as u8;
-                        let blue = 50 + ((200 / 4) * ((x * z + 2 * y - 3 * x + z) % 5)).abs() as u8;
+                        let c = color(x, y, z);
 
                         let x = x as i16;
                         let y = y as i16;
                         let z = z as i16;
 
-                        voxels.push(([x, y, z], [red, green, blue]));
+                        voxels.push(([x, y, z], c));
                     }
                 }
             }
+        }
+
+        for x in -r..=r {
+            voxels.push(([x as i16, -10, 0], [200, 200, 200]));
         }
 
         voxels
@@ -279,7 +296,12 @@ impl Context {
     fn create_bindings(gpu: &GpuContext) -> Bindings {
         use wgpu::BufferUsage as Usage;
 
-        let uniforms = <Uniforms as bytemuck::Zeroable>::zeroed();
+        let mut uniforms = <Uniforms as bytemuck::Zeroable>::zeroed();
+        uniforms.light = PointLight {
+            position: Vec3::new(0.4, -0.4, 0.02),
+            brightness: 0.9,
+        };
+
         let uniform_buffer = Buffer::new(gpu, Usage::UNIFORM | Usage::COPY_DST, &[uniforms]);
 
         let mut octree = vec![
@@ -486,16 +508,7 @@ impl Context {
     }
 
     fn update_bindings(&mut self) {
-        let time = 0.4 * self.start.elapsed().as_secs_f32();
-
-        let distance = 1.0;
-
-        self.camera.position = Vec3::new(
-            -distance * (0.4 * time).cos(),
-            distance - 1.0 * (0.3 * time).cos(),
-            -distance * (0.4 * time).sin(),
-        );
-        self.camera.direction = -self.camera.position.norm();
+        let time = self.start.elapsed().as_secs_f32();
 
         let [camera_right, camera_up, camera_forward] = self.camera.axis();
         let fov_scale = (self.camera.fov / 2.0).tan();
@@ -507,6 +520,7 @@ impl Context {
             camera_up: Vec3A::from(camera_up),
             camera_forward: Vec3A::from(camera_forward / fov_scale),
             time,
+            ..self.bindings.uniforms
         };
 
         self.bindings
