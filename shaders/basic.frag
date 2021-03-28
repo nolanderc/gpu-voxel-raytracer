@@ -57,16 +57,16 @@ void octant_intersections(
     out OctantIntersections intersections
 ) {
     vec3 delta = center - origin;
-    vec3 plane_entry = delta * inv_dir;
+    vec3 plane_entries = delta * inv_dir;
     int order[3] = int[3](0, 1, 2);
 
-    if (plane_entry.y < plane_entry.x) {
+    if (plane_entries.y < plane_entries.x) {
         order[0] = 1;
         order[1] = 0;
     }
-    if (plane_entry.z < plane_entry[order[1]]) {
+    if (plane_entries.z < plane_entries[order[1]]) {
         order[2] = order[1];
-        if (plane_entry.z < plane_entry[order[0]]) {
+        if (plane_entries.z < plane_entries[order[0]]) {
             order[1] = order[0];
             order[0] = 2;
         } else {
@@ -74,30 +74,39 @@ void octant_intersections(
         }
     }
 
-    int i = 0;
-    while (i < 3 && plane_entry[order[i]] < 0.0) { i++; }
+    vec3 entries = vec3(plane_entries[order[0]], plane_entries[order[1]], plane_entries[order[2]]);
 
     int octant = (delta.x < 0 ? 4 : 0) | (delta.y < 0 ? 2 : 0) | (delta.z < 0 ? 1 : 0);
+    float prev_time = entry;
 
-    while (i < 3 && plane_entry[order[i]] < entry) { 
-        octant ^= 4 >> order[i];
-        i++;
-    }
+    intersections.count = 0;
+    for (int i = 0; i < 3; i++) {
+        // we only want intersections within the current node
+        if (entries[i] < 0 || entries[i] >= exit) continue;
 
-    intersections.octants[0] = octant;
-    intersections.entries[0] = entry;
-    intersections.count = 1;
-
-    while (i < 3 && plane_entry[order[i]] < exit) {
-        octant ^= 4 >> order[i];
-
+        // store the current octant, with it's entry time
+        // (uses unconditional write for performance)
         intersections.octants[intersections.count] = octant;
-        intersections.entries[intersections.count] = plane_entry[order[i]];
-        intersections.count++;
+        intersections.entries[intersections.count] = prev_time;
 
-        i++;
+        if (entries[i] >= entry) {
+            // register the currently stored octant
+            intersections.count++;
+
+            // store the entry time for the next octant
+            prev_time = entries[i];
+        }
+
+        // move to the next octant
+        octant ^= 4 >> order[i];
     }
 
+    // Store the current octant (we know there's always one)
+    intersections.octants[intersections.count] = octant;
+    intersections.entries[intersections.count] = prev_time;
+    intersections.count++;
+
+    // Finally, store the time we enter the neighbouring node
     intersections.entries[intersections.count] = exit;
 }
 
@@ -111,9 +120,9 @@ struct Frame {
 
 bool cast_ray(vec3 ray_origin, vec3 ray_dir, out float time, out vec3 color, out vec3 normal) {
     float root_entry, root_exit;
+    int stack_size = 0;
 
     Frame stack[MAX_DEPTH];
-    int stack_size = 0;
 
     vec3 ray_inv_dir = 1.0 / ray_dir;
 
@@ -159,6 +168,8 @@ bool cast_ray(vec3 ray_origin, vec3 ray_dir, out float time, out vec3 color, out
 
         // Get the octant's value
         value = nodes[node + octant];
+
+        // Is it a color value?
         if (value < 0) {
             // found a voxel
             time = stack[c].intersections.entries[i];
@@ -170,6 +181,8 @@ bool cast_ray(vec3 ray_origin, vec3 ray_dir, out float time, out vec3 color, out
             normal_plane = distances.x == max_dist ? 0 : (distances.y == max_dist ? 1 : 2);
             break;
         };
+
+        // Is it empty?
         if (value == 0) continue;
 
         int child = value;

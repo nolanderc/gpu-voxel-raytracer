@@ -19,6 +19,7 @@ pub(crate) struct Context {
     bindings: Bindings,
 
     start: std::time::Instant,
+    fps_counter: FpsCounter,
 
     camera: crate::camera::Camera,
 }
@@ -67,6 +68,34 @@ struct Uniforms {
     time: f32,
 }
 
+struct FpsCounter {
+    prev_time: std::time::Instant,
+    frames: u32,
+}
+
+impl FpsCounter {
+    pub fn new() -> Self {
+        FpsCounter {
+            prev_time: std::time::Instant::now(),
+            frames: 0,
+        }
+    }
+
+    pub fn tick(&mut self) -> Option<f32> {
+        let now = std::time::Instant::now();
+        let elapsed = (now - self.prev_time).as_secs_f32();
+        self.frames += 1;
+        if elapsed > 0.25 {
+            let fps = self.frames as f32 / elapsed;
+            self.prev_time = now;
+            self.frames = 0;
+            Some(fps)
+        } else {
+            None
+        }
+    }
+}
+
 // Context creation
 impl Context {
     pub async fn new(window: Arc<winit::window::Window>) -> anyhow::Result<Context> {
@@ -101,6 +130,7 @@ impl Context {
             bindings,
 
             start: std::time::Instant::now(),
+            fps_counter: FpsCounter::new(),
 
             camera,
         })
@@ -144,7 +174,7 @@ impl Context {
             format: Self::SWAP_CHAIN_FORMAT,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: wgpu::PresentMode::Immediate,
         };
 
         gpu.device.create_swap_chain(&gpu.surface, &descriptor)
@@ -225,16 +255,19 @@ impl Context {
         let r = 32i32;
 
         for x in -r..=r {
-            for y in -r..=r {
+            for y in -r..0 {
                 for z in -r..=r {
-                    let d = r * r - (x * x + y*y + z * z);
-                    if 0 <= d && d <= r {
+                    let d = r * r - (x * x + y * y + z * z);
+                    if 0 <= d && d <= 2*r {
+                        let red = 50 + ((200 / 7) * ((x + z) % 8)).abs() as u8;
+                        let green = 50 + ((200 / r) * y).abs() as u8;
+                        let blue = 50 + ((200 / 4) * ((x * z + 2 * y - 3 * x + z) % 5)).abs() as u8;
+
                         let x = x as i16;
                         let y = y as i16;
                         let z = z as i16;
 
-                        voxels.push(([x, y, z], [50, 150, 50]));
-                        voxels.push(([x, -y, z], [50, 150, 50]));
+                        voxels.push(([x, y, z], [red, green, blue]));
                     }
                 }
             }
@@ -355,12 +388,10 @@ impl Context {
 
         match event {
             Event::MainEventsCleared => {
-                let render_time = std::time::Instant::now();
+                if let Some(fps) = self.fps_counter.tick() {
+                    self.window.set_title(&format!("voxels @ {:.1}", fps));
+                }
                 pollster::block_on(self.render()).context("failed to render frame")?;
-                println!(
-                    "render: {} ms",
-                    render_time.elapsed().as_secs_f32() * 1000.0
-                );
             }
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => {
@@ -457,10 +488,12 @@ impl Context {
     fn update_bindings(&mut self) {
         let time = 0.1 * self.start.elapsed().as_secs_f32();
 
+        let distance = 1.0;
+
         self.camera.position = Vec3::new(
-            -1.5 * (0.4 * time).cos(),
-            1.5 - 1.0 * (0.3 * time).cos(),
-            -1.5 * (0.4 * time).sin(),
+            -distance * (0.4 * time).cos(),
+            distance - 1.0 * (0.3 * time).cos(),
+            -distance * (0.4 * time).sin(),
         );
         self.camera.direction = -self.camera.position.norm();
 

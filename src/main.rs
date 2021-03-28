@@ -38,6 +38,8 @@ pub(crate) struct Ray {
 }
 
 fn main() -> anyhow::Result<()> {
+    setup_panic_handler();
+
     init_log_subscriber();
 
     let size = Size {
@@ -61,6 +63,15 @@ fn main() -> anyhow::Result<()> {
             eprintln!("ERROR: {:#?}", e);
         }
     })
+}
+
+// In case there's a panic, take down the whole program
+fn setup_panic_handler() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        original_hook(panic_info);
+        std::process::exit(1);
+    }));
 }
 
 fn init_log_subscriber() {
