@@ -1,6 +1,6 @@
 #version 450
 
-#define MAX_DEPTH 15
+#define MAX_DEPTH 10
 
 layout(location = 0) in vec2 frag_coord;
 
@@ -39,16 +39,32 @@ bool ray_cube_intersection(
     return exit >= 0 && entry < exit;
 }
 
-vec3 octant_center(vec3 center, float size, int octant) {
+vec3 octant_center(vec3 center, float size, uint octant) {
     vec3 delta = vec3((octant >> 2) & 1, (octant >> 1) & 1, octant & 1);
     return center + 0.25 * size * sign(delta - 0.5);
 }
 
 struct OctantIntersections {
-    int count;
-    int octants[4];
+    uint octants_and_count;
     float entries[5];
 };
+
+void insert_octant(inout uint octants, uint octant, int octant_index) {
+    octants = bitfieldInsert(octants, octant, 3 * (octant_index + 1), 3);
+}
+
+uint get_octant(uint octants, int octant_index) {
+    return bitfieldExtract(octants, 3 * (octant_index + 1), 3);
+}
+
+// (1 <= count <= 4, so we store 0 <= count - 1 <= 3 using 2 bits)
+void insert_count(inout uint octants, uint count) {
+    octants |= count - 1;
+}
+
+uint get_count(uint octants) {
+    return (octants & 0x3) + 1;
+}
 
 void octant_intersections(
     vec3 origin, vec3 inv_dir, 
@@ -76,22 +92,20 @@ void octant_intersections(
 
     vec3 entries = vec3(plane_entries[order[0]], plane_entries[order[1]], plane_entries[order[2]]);
 
-    int octant = (delta.x < 0 ? 4 : 0) | (delta.y < 0 ? 2 : 0) | (delta.z < 0 ? 1 : 0);
+    uint octant = (delta.x < 0 ? 4 : 0) | (delta.y < 0 ? 2 : 0) | (delta.z < 0 ? 1 : 0);
     float prev_time = entry;
 
-    intersections.count = 0;
+    int count = 0;
+    intersections.octants_and_count = 0;
     for (int i = 0; i < 3; i++) {
         // we only want intersections within the current node
         if (entries[i] < 0 || entries[i] >= exit) continue;
 
-        // store the current octant, with it's entry time
-        // (uses unconditional write for performance)
-        intersections.octants[intersections.count] = octant;
-        intersections.entries[intersections.count] = prev_time;
-
         if (entries[i] >= entry) {
-            // register the currently stored octant
-            intersections.count++;
+            // store the current octant, with it's entry time
+            insert_octant(intersections.octants_and_count, octant, count);
+            intersections.entries[count] = prev_time;
+            count++;
 
             // store the entry time for the next octant
             prev_time = entries[i];
@@ -102,12 +116,15 @@ void octant_intersections(
     }
 
     // Store the current octant (we know there's always one)
-    intersections.octants[intersections.count] = octant;
-    intersections.entries[intersections.count] = prev_time;
-    intersections.count++;
+    insert_octant(intersections.octants_and_count, octant, count);
+    intersections.entries[count] = prev_time;
+    count++;
+
+    // store the count
+    insert_count(intersections.octants_and_count, count);
 
     // Finally, store the time we enter the neighbouring node
-    intersections.entries[intersections.count] = exit;
+    intersections.entries[count] = exit;
 }
 
 struct Frame {
@@ -157,14 +174,14 @@ bool cast_ray(vec3 ray_origin, vec3 ray_dir, out float time, out vec3 color, out
         int i = stack[c].stage++;
 
         // This node is done.
-        if (i >= stack[c].intersections.count) {
+        if (i >= get_count(stack[c].intersections.octants_and_count)) {
             // Pop from the stack.
             stack_size--;
             continue;
         }
 
         int node = stack[c].node;
-        int octant = stack[c].intersections.octants[i];
+        uint octant = get_octant(stack[c].intersections.octants_and_count, i);
 
         // Get the octant's value
         value = nodes[node + octant];

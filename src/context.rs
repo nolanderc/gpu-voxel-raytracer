@@ -486,7 +486,7 @@ impl Context {
     }
 
     fn update_bindings(&mut self) {
-        let time = 0.1 * self.start.elapsed().as_secs_f32();
+        let time = 0.4 * self.start.elapsed().as_secs_f32();
 
         let distance = 1.0;
 
