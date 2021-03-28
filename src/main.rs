@@ -55,6 +55,11 @@ fn main() -> anyhow::Result<()> {
         .build(&event_loop)
         .expect("could not open window");
     let window = Arc::new(window);
+    
+    window.set_cursor_visible(false);
+    if let Err(e) = window.set_cursor_grab(true) {
+        warn!("failed to grab mouse cursor: {}", e);
+    }
 
     let mut context = pollster::block_on(crate::context::Context::new(window))?;
     

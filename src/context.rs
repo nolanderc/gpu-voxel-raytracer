@@ -7,6 +7,7 @@ mod shader;
 use self::buffer::Buffer;
 use crate::linear::Vec3;
 use anyhow::Context as _;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub(crate) struct Context {
@@ -15,13 +16,28 @@ pub(crate) struct Context {
     gpu: GpuContext,
     swap_chain: wgpu::SwapChain,
     output_size: crate::Size,
+
     pipeline: wgpu::RenderPipeline,
+    compute_pipeline: wgpu::ComputePipeline,
+
     bindings: Bindings,
+    bind_groups: BindGroups,
 
     start: std::time::Instant,
     fps_counter: FpsCounter,
+    stopwatch: Stopwatch,
+    shader_watcher: DirectoryWatcher,
+
+    pressed_keys: HashSet<winit::event::VirtualKeyCode>,
 
     camera: crate::camera::Camera,
+    pitch: f32,
+    yaw: f32,
+}
+
+struct DirectoryWatcher {
+    watcher: notify::RecommendedWatcher,
+    events: std::sync::mpsc::Receiver<notify::DebouncedEvent>,
 }
 
 pub(crate) struct GpuContext {
@@ -33,13 +49,20 @@ pub(crate) struct GpuContext {
 }
 
 struct Bindings {
-    bind_group: wgpu::BindGroup,
-    bind_group_layout: wgpu::BindGroupLayout,
-
     uniform_buffer: Buffer<Uniforms>,
     uniforms: Uniforms,
-
     octree_buffer: Buffer<i32>,
+    voxel_image: wgpu::Texture,
+}
+
+struct BindGroups {
+    render: BindGroup,
+    compute: BindGroup,
+}
+
+struct BindGroup {
+    layout: wgpu::BindGroupLayout,
+    bindings: wgpu::BindGroup,
 }
 
 #[repr(C)]
@@ -74,6 +97,25 @@ struct Uniforms {
 struct PointLight {
     position: Vec3,
     brightness: f32,
+}
+
+struct Stopwatch {
+    prev_time: std::time::Instant,
+}
+
+impl Stopwatch {
+    pub fn new() -> Stopwatch {
+        Stopwatch {
+            prev_time: std::time::Instant::now(),
+        }
+    }
+
+    pub fn tick(&mut self) -> std::time::Duration {
+        let now = std::time::Instant::now();
+        let duration = now.saturating_duration_since(self.prev_time);
+        self.prev_time = now;
+        duration
+    }
 }
 
 struct FpsCounter {
@@ -119,14 +161,20 @@ impl Context {
 
         let output_size = window.inner_size();
         let swap_chain = Self::create_swap_chain(&gpu, output_size);
-        let bindings = Self::create_bindings(&gpu);
-        let pipeline = Self::create_render_pipeline(&gpu, &bindings)?;
+        let bindings = Self::create_bindings(&gpu, output_size);
+
+        let bind_groups = Self::create_bind_groups(&gpu, &bindings);
+
+        let pipeline = Self::create_render_pipeline(&gpu, &bind_groups.render)?;
+        let compute_pipeline = Self::create_compute_pipeline(&gpu, &bind_groups.compute)?;
 
         let camera = crate::camera::Camera {
-            position: Vec3::new(0.0, 0.8, -1.0),
+            position: 2.0 * Vec3::new(0.0, 0.5, -1.0),
             direction: Vec3::new(0.0, -0.8, 1.0),
             fov: 70.0f32.to_radians(),
         };
+
+        let shader_watcher = DirectoryWatcher::new("shaders/")?;
 
         Ok(Context {
             window,
@@ -134,17 +182,27 @@ impl Context {
             gpu,
             swap_chain,
             output_size,
-            pipeline,
+
             bindings,
+            bind_groups,
+            pipeline,
+            compute_pipeline,
 
             start: std::time::Instant::now(),
+            stopwatch: Stopwatch::new(),
             fps_counter: FpsCounter::new(),
+            shader_watcher,
+
+            pressed_keys: HashSet::new(),
 
             camera,
+            pitch: 0.0,
+            yaw: 0.0,
         })
     }
 
-    pub const SWAP_CHAIN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+    pub const SWAP_CHAIN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+    pub const VOXEL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
     async fn create_gpu_context(window: &winit::window::Window) -> anyhow::Result<GpuContext> {
         let backends = wgpu::BackendBit::PRIMARY;
@@ -233,7 +291,7 @@ impl Context {
 
                     current = child;
                     center = child_center;
-                    extent = extent / 2;
+                    extent /= 2;
                 }
             }
         }
@@ -260,20 +318,20 @@ impl Context {
     fn create_voxels() -> Vec<([i16; 3], [u8; 3])> {
         let mut voxels = Vec::new();
 
-        let r = 32i32;
+        let radius = 32i32;
 
         let color = |x: i32, y: i32, z: i32| {
             let red = 50 + ((200 / 7) * ((x + z) % 8)).abs() as u8;
-            let green = 50 + ((200 / r) * y).abs() as u8;
+            let green = 50 + ((200 / radius) * y).abs() as u8;
             let blue = 50 + ((200 / 4) * ((x * z + 2 * y - 3 * x + z) % 5)).abs() as u8;
             [red, green, blue]
         };
 
-        for x in -r..=r {
-            for y in -r..0 {
-                for z in -r..=r {
-                    let d = r * r - (x * x + y * y + z * z);
-                    if 0 <= d && d <= 2*r {
+        for x in -radius..=radius {
+            for y in -radius..0 {
+                for z in -radius..=radius {
+                    let dist = radius * radius - (x * x + y * y + z * z);
+                    if 0 <= dist && dist <= 2 * radius {
                         let c = color(x, y, z);
 
                         let x = x as i16;
@@ -286,20 +344,20 @@ impl Context {
             }
         }
 
-        for x in -r..=r {
+        for x in -radius..=radius {
             voxels.push(([x as i16, -10, 0], [200, 200, 200]));
         }
 
         voxels
     }
 
-    fn create_bindings(gpu: &GpuContext) -> Bindings {
+    fn create_bindings(gpu: &GpuContext, output_size: crate::Size) -> Bindings {
         use wgpu::BufferUsage as Usage;
 
         let mut uniforms = <Uniforms as bytemuck::Zeroable>::zeroed();
         uniforms.light = PointLight {
             position: Vec3::new(0.4, -0.4, 0.02),
-            brightness: 0.9,
+            brightness: 0.01,
         };
 
         let uniform_buffer = Buffer::new(gpu, Usage::UNIFORM | Usage::COPY_DST, &[uniforms]);
@@ -312,52 +370,126 @@ impl Context {
         ];
 
         let nodes = Self::create_octree_nodes(Self::create_voxels());
-
         octree.extend(nodes);
 
         let octree_buffer = Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &octree);
 
-        let (layout_entries, binding_entries) = bind_group![
-            Uniform(0 => (uniform_buffer) in wgpu::ShaderStage::FRAGMENT),
-            Storage(1 => (octree_buffer, read_only: true) in wgpu::ShaderStage::FRAGMENT),
-        ];
-
-        let bind_group_layout =
-            gpu.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: None,
-                    entries: &layout_entries,
-                });
-
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &bind_group_layout,
-            entries: &binding_entries,
-        });
+        let voxel_image = Self::create_storage_texture(gpu, output_size, Self::VOXEL_FORMAT);
 
         Bindings {
-            bind_group,
-            bind_group_layout,
             uniform_buffer,
             uniforms,
             octree_buffer,
+            voxel_image,
         }
+    }
+
+    fn create_storage_texture(
+        gpu: &GpuContext,
+        size: crate::Size,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::Texture {
+        Self::create_texture(
+            gpu,
+            size,
+            format,
+            wgpu::TextureUsage::COPY_SRC | wgpu::TextureUsage::STORAGE,
+        )
+    }
+
+    fn create_texture(
+        gpu: &GpuContext,
+        size: crate::Size,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsage,
+    ) -> wgpu::Texture {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: size.width,
+                height: size.height,
+                depth: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+        })
+    }
+
+    fn create_bind_groups(gpu: &GpuContext, bindings: &Bindings) -> BindGroups {
+        BindGroups {
+            render: Self::create_render_bind_group(gpu, bindings),
+            compute: Self::create_compute_bind_group(gpu, bindings),
+        }
+    }
+
+    fn create_render_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
+        let voxel_view = Self::view(&bindings.voxel_image);
+        let (layout, bindings) = bind_group![
+            UniformImage(0 => (&voxel_view, ReadOnly, Self::VOXEL_FORMAT, D2) in FRAGMENT),
+            // Uniform(0 => (bindings.uniform_buffer) in wgpu::ShaderStage::FRAGMENT),
+        ];
+
+        BindGroup::from_entries(gpu, &layout, &bindings)
+    }
+
+    fn view(texture: &wgpu::Texture) -> wgpu::TextureView {
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    fn create_compute_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
+        let voxel_view = Self::view(&bindings.voxel_image);
+        let (layout, bindings) = bind_group![
+            UniformImage(0 => (&voxel_view, WriteOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
+            Uniform(1 => (&bindings.uniform_buffer) in COMPUTE),
+            Storage(2 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
+        ];
+
+        BindGroup::from_entries(gpu, &layout, &bindings)
+    }
+
+    fn create_compute_pipeline(
+        gpu: &GpuContext,
+        bind_group: &BindGroup,
+    ) -> anyhow::Result<wgpu::ComputePipeline> {
+        let compute_module = shader::create_shader_module(gpu, "shaders/voxels.comp")?;
+
+        let layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[&bind_group.layout],
+                push_constant_ranges: &[],
+            });
+
+        let pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: Some(&layout),
+                module: &compute_module,
+                entry_point: "main",
+            });
+
+        Ok(pipeline)
     }
 
     fn create_render_pipeline(
         gpu: &GpuContext,
-        bindings: &Bindings,
+        bind_group: &BindGroup,
     ) -> anyhow::Result<wgpu::RenderPipeline> {
         let layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&bindings.bind_group_layout],
+                bind_group_layouts: &[&bind_group.layout],
                 push_constant_ranges: &[],
             });
 
         let vertex_module = shader::create_shader_module(gpu, "shaders/basic.vert")?;
-        let fragment_module = shader::create_shader_module(gpu, "shaders/basic.frag")?;
+        let fragment_module = shader::create_shader_module(gpu, "shaders/display.frag")?;
 
         let vertex = wgpu::VertexState {
             module: &vertex_module,
@@ -396,6 +528,15 @@ impl Context {
 
         Ok(pipeline)
     }
+
+    fn recreate_pipeline(&mut self) -> anyhow::Result<()> {
+        info!("recreating render pipeline");
+        self.pipeline = Self::create_render_pipeline(&self.gpu, &self.bind_groups.render)?;
+        info!("recreating compute pipeline");
+        self.compute_pipeline =
+            Self::create_compute_pipeline(&self.gpu, &self.bind_groups.compute)?;
+        Ok(())
+    }
 }
 
 // Event handling
@@ -405,14 +546,35 @@ impl Context {
         event: winit::event::Event<()>,
         flow: &mut winit::event_loop::ControlFlow,
     ) -> anyhow::Result<()> {
-        use winit::event::{Event, WindowEvent};
+        use winit::event::{DeviceEvent, Event, WindowEvent};
         use winit::event_loop::ControlFlow;
 
         match event {
             Event::MainEventsCleared => {
+                while let Ok(event) = self.shader_watcher.events.try_recv() {
+                    match event {
+                        notify::DebouncedEvent::Create(_)
+                        | notify::DebouncedEvent::Write(_)
+                        | notify::DebouncedEvent::Chmod(_)
+                        | notify::DebouncedEvent::Remove(_)
+                        | notify::DebouncedEvent::Rename(_, _) => self
+                            .recreate_pipeline()
+                            .context("failed to recreate pipeline")?,
+                        notify::DebouncedEvent::Rescan
+                        | notify::DebouncedEvent::NoticeWrite(_)
+                        | notify::DebouncedEvent::NoticeRemove(_) => { /* ignore */ }
+                        notify::DebouncedEvent::Error(error, path) => {
+                            error!(?path, "while watching shader directory: {}", error);
+                        }
+                    }
+                }
+
                 if let Some(fps) = self.fps_counter.tick() {
                     self.window.set_title(&format!("voxels @ {:.1}", fps));
                 }
+
+                let dt = self.stopwatch.tick().as_secs_f32();
+                self.update(dt);
                 pollster::block_on(self.render()).context("failed to render frame")?;
             }
             Event::WindowEvent { event, .. } => match event {
@@ -420,16 +582,33 @@ impl Context {
                     *flow = ControlFlow::Exit;
                 }
                 WindowEvent::KeyboardInput { input, .. } => {
-                    use winit::event::VirtualKeyCode as Key;
+                    use winit::event::{ElementState::Pressed, VirtualKeyCode as Key};
 
-                    let pressed = |key| {
-                        input.state == winit::event::ElementState::Pressed
-                            && input.virtual_keycode == Some(key)
-                    };
+                    if let Some(key) = input.virtual_keycode {
+                        match input.state {
+                            winit::event::ElementState::Pressed => {
+                                self.pressed_keys.insert(key);
+                            }
+                            winit::event::ElementState::Released => {
+                                self.pressed_keys.remove(&key);
+                            }
+                        }
 
-                    if pressed(Key::Escape) {
-                        *flow = ControlFlow::Exit;
+                        match key {
+                            Key::Escape => *flow = ControlFlow::Exit,
+                            Key::Space if input.state == Pressed => {
+                                self.bindings.uniforms.light.position = self.camera.position
+                            }
+                            _ => {}
+                        }
                     }
+                }
+                _ => {}
+            },
+            Event::DeviceEvent { event, .. } => match event {
+                DeviceEvent::MouseMotion { delta: (dx, dy) } => {
+                    self.yaw += 0.001 * dx as f32;
+                    self.pitch -= 0.001 * dy as f32;
                 }
                 _ => {}
             },
@@ -442,6 +621,45 @@ impl Context {
 
 // Rendering
 impl Context {
+    pub fn update(&mut self, dt: f32) {
+        use winit::event::VirtualKeyCode as Key;
+
+        self.camera.direction = Vec3::new(
+            self.yaw.sin() * self.pitch.cos(),
+            self.pitch.sin(),
+            self.yaw.cos() * self.pitch.cos(),
+        );
+
+        let [right, _, forward] = self.camera.axis();
+        let mut movement = Vec3::zero();
+        if self.pressed_keys.contains(&Key::Up) {
+            movement += forward;
+        }
+        if self.pressed_keys.contains(&Key::Down) {
+            movement -= forward;
+        }
+        if self.pressed_keys.contains(&Key::Right) {
+            movement += right;
+        }
+        if self.pressed_keys.contains(&Key::Left) {
+            movement -= right;
+        }
+        if self.pressed_keys.contains(&Key::PageUp) {
+            movement.y += 1.0;
+        }
+        if self.pressed_keys.contains(&Key::PageDown) {
+            movement.y -= 1.0;
+        }
+        if movement != Vec3::zero() {
+            let speed = if self.pressed_keys.contains(&Key::RShift) {
+                1.0
+            } else {
+                0.2
+            };
+            self.camera.position += speed * dt * movement.norm();
+        }
+    }
+
     pub async fn render(&mut self) -> anyhow::Result<()> {
         let output = self.get_next_frame()?;
 
@@ -451,6 +669,15 @@ impl Context {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+
+        {
+            let mut cpass =
+                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
+
+            cpass.set_pipeline(&self.compute_pipeline);
+            cpass.set_bind_group(0, &self.bind_groups.compute.bindings, &[]);
+            cpass.dispatch(self.output_size.width, self.output_size.height, 1);
+        }
 
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -467,7 +694,7 @@ impl Context {
             });
 
             rpass.set_pipeline(&self.pipeline);
-            rpass.set_bind_group(0, &self.bindings.bind_group, &[]);
+            rpass.set_bind_group(0, &self.bind_groups.render.bindings, &[]);
             rpass.draw(0..6, 0..1);
         }
 
@@ -510,15 +737,13 @@ impl Context {
     fn update_bindings(&mut self) {
         let time = self.start.elapsed().as_secs_f32();
 
-        let [camera_right, camera_up, camera_forward] = self.camera.axis();
-        let fov_scale = (self.camera.fov / 2.0).tan();
-        let aspect = self.output_size.width as f32 / self.output_size.height as f32;
+        let [camera_right, camera_up, camera_forward] = self.camera.axis_scaled(self.output_size);
 
         self.bindings.uniforms = Uniforms {
             camera_origin: self.camera.position.into(),
-            camera_right: Vec3A::from(aspect * camera_right),
+            camera_right: Vec3A::from(camera_right),
             camera_up: Vec3A::from(camera_up),
-            camera_forward: Vec3A::from(camera_forward / fov_scale),
+            camera_forward: Vec3A::from(camera_forward),
             time,
             ..self.bindings.uniforms
         };
@@ -531,4 +756,47 @@ impl Context {
 
 fn color(r: f64, g: f64, b: f64, a: f64) -> wgpu::Color {
     wgpu::Color { r, g, b, a }
+}
+
+impl BindGroup {
+    pub fn from_entries(
+        gpu: &GpuContext,
+        layout: &[wgpu::BindGroupLayoutEntry],
+        bindings: &[wgpu::BindGroupEntry],
+    ) -> BindGroup {
+        let layout = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: None,
+                entries: layout,
+            });
+
+        let bindings = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &layout,
+            entries: bindings,
+        });
+
+        BindGroup { layout, bindings }
+    }
+}
+
+impl DirectoryWatcher {
+    fn new(path: impl AsRef<std::path::Path>) -> anyhow::Result<DirectoryWatcher> {
+        use notify::Watcher;
+
+        let path = path.as_ref();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = notify::watcher(tx, std::time::Duration::from_millis(500))
+            .context("failed to create file system watcher")?;
+        watcher
+            .watch(path, notify::RecursiveMode::Recursive)
+            .with_context(|| format!("failed to watch over directory `{}`", path.display()))?;
+
+        Ok(DirectoryWatcher {
+            watcher,
+            events: rx,
+        })
+    }
 }
