@@ -2,6 +2,8 @@
 
 #define MAX_DEPTH 15
 
+#define ALMOST_INFINITY (1 << 30)
+
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(rgba32f, binding = 0) uniform writeonly image2D output_image;
 
@@ -66,179 +68,133 @@ uint get_count(uint octants) {
     return (octants & 0x3) + 1;
 }
 
-void octant_intersections(
-    vec3 origin, vec3 inv_dir, 
-    vec3 center, float size, 
-    float entry, float exit,
-    out OctantIntersections intersections
-) {
-    vec3 delta = center - origin;
-    vec3 plane_entries = delta * inv_dir;
-    int order[3] = int[3](0, 1, 2);
-
-    if (plane_entries.y < plane_entries.x) {
-        order[0] = 1;
-        order[1] = 0;
-    }
-    if (plane_entries.z < plane_entries[order[1]]) {
-        order[2] = order[1];
-        if (plane_entries.z < plane_entries[order[0]]) {
-            order[1] = order[0];
-            order[0] = 2;
-        } else {
-            order[1] = 2;
-        }
-    }
-
-    vec3 entries = vec3(plane_entries[order[0]], plane_entries[order[1]], plane_entries[order[2]]);
-
-    uint dx = (delta.x < 0 || (!(delta.x > 0) && inv_dir.x < 0)) ? 4 : 0;
-    uint dy = (delta.y < 0 || (!(delta.y > 0) && inv_dir.y < 0)) ? 2 : 0;
-    uint dz = (delta.z < 0 || (!(delta.z > 0) && inv_dir.z < 0)) ? 1 : 0;
-    uint octant = dx + dy + dz;
-    float prev_time = entry;
-
-    int count = 0;
-    intersections.octants_and_count = 0;
-    for (int i = 0; i < 3; i++) {
-        // we only want intersections within the current node
-        if (entries[i] < 0 || entries[i] >= exit) continue;
-
-        if (entries[i] >= entry) {
-            // store the current octant, with it's entry time
-            insert_octant(intersections.octants_and_count, octant, count);
-            intersections.entries[count] = prev_time;
-            count++;
-
-            // store the entry time for the next octant
-            prev_time = entries[i];
-        }
-
-        // move to the next octant
-        octant ^= 4 >> order[i];
-    }
-
-    // Store the current octant (we know there's always one)
-    insert_octant(intersections.octants_and_count, octant, count);
-    intersections.entries[count] = prev_time;
-    count++;
-
-    // store the count
-    insert_count(intersections.octants_and_count, count);
-
-    // Finally, store the time we enter the neighbouring node
-    intersections.entries[count] = exit;
+uint current_octant(vec3 position, vec3 center) {
+    vec3 delta = position - center;
+    uint dx = delta.x > 0 ? 4 : 0; // (delta.x > 0 || (!(delta.x < 0) && inv_dir.x < 0)) ? 4 : 0;
+    uint dy = delta.y > 0 ? 2 : 0; // (delta.y > 0 || (!(delta.y < 0) && inv_dir.y < 0)) ? 2 : 0;
+    uint dz = delta.z > 0 ? 1 : 0; // (delta.z > 0 || (!(delta.z < 0) && inv_dir.z < 0)) ? 1 : 0;
+    return dx + dy + dz;
 }
 
 struct Frame {
     int node;
-    int stage;
+    float exit;
     vec3 center;
     float size;
-    OctantIntersections intersections;
+    uint octant;
 };
 
-uint iterations = 0;
-
+int iterations = 0;
 bool cast_ray(vec3 ray_origin, vec3 ray_dir, out float time, out vec3 color, out vec3 normal) {
+    const uint dir_mask = (ray_dir.x < 0 ? 4 : 0) | (ray_dir.y < 0 ? 2 : 0) | (ray_dir.z < 0 ? 1 : 0);
+
+    const vec3 ray_inv_dir = 1.0 / ray_dir;
+
     float root_entry, root_exit;
-    int stack_size = 0;
-
-    Frame stack[MAX_DEPTH];
-
-    vec3 ray_inv_dir = 1.0 / ray_dir;
-
     bool intersect = ray_cube_intersection(
             ray_origin, ray_inv_dir, 
             root_center, 0.5 * root_size,
             root_entry, root_exit
         );
 
-    if (intersect) {
-        octant_intersections(
-                ray_origin, ray_inv_dir,
-                root_center, root_size,
-                root_entry, root_exit,
-                stack[0].intersections
-            );
-
-        stack[0].node = 0;
-        stack[0].stage = 0;
-        stack[0].center = root_center;
-        stack[0].size = root_size;
-        stack_size = 1;
-    } else {
+    if (!intersect) {
         return false;
     }
 
-    int value = 0;
-    int normal_plane;
-    while (stack_size > 0) {
+    Frame stack[MAX_DEPTH];
+    int top = 0;
+
+    time = max(0, root_entry);
+    int node = 0;
+    float exit = root_exit;
+    vec3 center = root_center;
+    float size = root_size;
+    uint octant = current_octant(ray_origin + ray_dir * time, center);
+
+    int value;
+
+    while(true) {
         iterations++;
-        // Advance to next octant of current node.
-        int c = stack_size - 1;
-        int i = stack[c].stage++;
 
-        // This node is done.
-        if (i >= get_count(stack[c].intersections.octants_and_count)) {
-            // Pop from the stack.
-            stack_size--;
-            continue;
-        }
-
-        int node = stack[c].node;
-        uint octant = get_octant(stack[c].intersections.octants_and_count, i);
-
-        // Get the octant's value
-        value = nodes[node + octant];
-
-        // Is it a color value?
-        if (value < 0) {
-            // found a voxel
-            time = stack[c].intersections.entries[i];
-            vec3 point = ray_origin + ray_dir * time;
-            vec3 child_center = octant_center(stack[c].center, stack[c].size, octant);
-            vec3 delta = point - child_center;
-            vec3 distances = abs(delta);
-            float max_dist = max(max(distances.x, distances.y), distances.z);
-            normal_plane = distances.x == max_dist ? 0 : (distances.y == max_dist ? 1 : 2);
-            break;
+        if (iterations >= 128) { 
+            color = vec3(0);
+            return true;
         };
 
-        // Is it empty?
-        if (value == 0) continue;
+        value = nodes[node + octant];
 
-        int child = value;
-        vec3 child_center = octant_center(stack[c].center, stack[c].size, octant);
-        float child_size = 0.5 * stack[c].size;
+        if (value < 0) {
+            // We found a value
+            color = vec3((value >> 16) & 0xff, (value >> 8) & 0xff, (value) & 0xff) / 255.0;
 
-        // Find intersections with the octant, and push onto stack
-        octant_intersections(
-                ray_origin, ray_inv_dir,
-                child_center, child_size,
-                stack[c].intersections.entries[i], stack[c].intersections.entries[i+1],
-                stack[stack_size].intersections
-            );
-        stack[stack_size].node = child;
-        stack[stack_size].stage = 0;
-        stack[stack_size].center = child_center;
-        stack[stack_size].size = child_size;
-        stack_size++;
+            vec3 hit = ray_origin + time * ray_dir;
+            vec3 octant_center = octant_center(center, size, octant);
+            vec3 distances = abs(hit - octant_center);
+            float max_dist = max(max(distances.x, distances.y), distances.z);
+            bvec3 normal_mask = equal(distances, vec3(max_dist));
+            normal = vec3(normal_mask) * -sign(ray_dir);
+
+            return true;
+        }
+
+        vec3 t_mid = (center - ray_origin) * ray_inv_dir;
+
+        uint directional_octant = octant ^ dir_mask;
+        bvec3 locked = bvec3(directional_octant & 4, directional_octant & 2, directional_octant & 1);
+        bvec3 ahead = greaterThanEqual(t_mid, vec3(time));
+
+        vec3 mid_intersect = vec3(not(ahead)) * t_mid + vec3(ahead) * vec3(ALMOST_INFINITY);
+        mid_intersect = vec3(not(locked)) * t_mid + vec3(locked) * vec3(ALMOST_INFINITY);
+
+        float next_time = min(min(mid_intersect.x, mid_intersect.y), mid_intersect.z);
+        bvec3 plane = equal(mid_intersect, vec3(next_time));
+        // uint transition = uint(dot(vec3(plane), vec3(4, 2, 1)));
+        uint transition = plane.x ? 4 : (plane.y ? 2 : (plane.z ? 1 : 0));
+
+        uint next_octant = octant ^ transition;
+        bool has_next = next_time <= exit && transition != 0 && (directional_octant & transition) == 0;
+
+        if (value > 0) {
+            // Push next to stack, and continue with child
+            if (has_next) {
+                stack[top].node = node;
+                stack[top].exit = exit;
+                stack[top].center = center;
+                stack[top].size = size;
+                stack[top].octant = next_octant;
+                top++;
+            }
+
+            node = value;
+            center = octant_center(center, size, octant);
+            size = 0.5 * size;
+            octant = current_octant(ray_origin + ray_dir * time, center);
+
+            float octant_entry, octant_exit;
+            ray_cube_intersection(ray_origin, ray_inv_dir, center, 0.5 * size, octant_entry, octant_exit);
+            time = max(time, octant_entry);
+            exit = octant_exit;
+        } else if (has_next) {
+            octant = next_octant;
+            time = next_time;
+        } else {
+            // we couldn't advance, pop the stack and continue.
+
+            // no more nodes, failed to intersect
+            if (top == 0) return false;
+
+            time = exit;
+
+            top--;
+            node = stack[top].node;
+            exit = stack[top].exit;
+            center = stack[top].center;
+            size = stack[top].size;
+            octant = stack[top].octant;
+        }
+
+        // Recurse
     }
-
-    if (stack_size == 0) {
-        return false;
-    }
-
-    int r = (value >> 16) & 0xff;
-    int g = (value >> 8) & 0xff;
-    int b = value & 0xff;
-    color = vec3(r, g, b) / 255.0;
-
-    normal = vec3(0);
-    normal[normal_plane] = -sign(ray_dir[normal_plane]);
-
-    return true;
 }
 
 void main() {
@@ -255,7 +211,7 @@ void main() {
     vec3 color, normal;
     bool hit = cast_ray(ray_origin, ray_dir, time, color, normal);
 
-    vec4 out_color;
+    vec3 out_color;
 
     const float ambient = 0.004;
     if (hit) {
@@ -270,11 +226,11 @@ void main() {
         bool shadow = obstructed && shadow_time <= light_distance;
 
         float diffuse = light.w * max(0.0, dot(-light_dir, normal)) / pow(light_distance, 2);
-        float brightness = ambient + (shadow ? 0 : diffuse);
-        out_color = vec4(color * brightness, 1);
+        float brightness = ambient + (shadow ? 0.2 * diffuse : diffuse);
+        out_color = color * brightness;
     } else {
-        out_color = vec4(vec3(ambient), 1);
+        out_color = vec3(abs(ray_dir));
     }
 
-    imageStore(output_image, coord, out_color);
+    imageStore(output_image, coord, vec4(out_color, 1));
 }

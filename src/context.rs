@@ -357,7 +357,7 @@ impl Context {
         let mut uniforms = <Uniforms as bytemuck::Zeroable>::zeroed();
         uniforms.light = PointLight {
             position: Vec3::new(0.4, -0.4, 0.02),
-            brightness: 0.01,
+            brightness: 0.05,
         };
 
         let uniform_buffer = Buffer::new(gpu, Usage::UNIFORM | Usage::COPY_DST, &[uniforms]);
@@ -676,7 +676,12 @@ impl Context {
 
             cpass.set_pipeline(&self.compute_pipeline);
             cpass.set_bind_group(0, &self.bind_groups.compute.bindings, &[]);
-            cpass.dispatch(self.output_size.width / 16, self.output_size.height / 16, 1);
+
+            let local_x = 16;
+            let local_y = 16;
+            let groups_x = (self.output_size.width + local_x - 1) / local_x;
+            let groups_y = (self.output_size.height + local_y - 1) / local_y;
+            cpass.dispatch(groups_x, groups_y, 1);
         }
 
         {

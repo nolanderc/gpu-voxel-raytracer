@@ -65,7 +65,7 @@ fn main() -> anyhow::Result<()> {
     
     event_loop.run(move |event, _, flow| {
         if let Err(e) = context.handle_event(event, flow) {
-            eprintln!("ERROR: {:#?}", e);
+            eprintln!("ERROR: {:?}", e);
         }
     })
 }
