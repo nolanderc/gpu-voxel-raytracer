@@ -148,7 +148,6 @@ bool cast_ray(vec3 ray_origin, vec3 ray_dir, out float time, out vec3 color, out
 
         float next_time = min(min(mid_intersect.x, mid_intersect.y), mid_intersect.z);
         bvec3 plane = equal(mid_intersect, vec3(next_time));
-        // uint transition = uint(dot(vec3(plane), vec3(4, 2, 1)));
         uint transition = plane.x ? 4 : (plane.y ? 2 : (plane.z ? 1 : 0));
 
         uint next_octant = octant ^ transition;
