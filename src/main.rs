@@ -47,7 +47,6 @@ fn main() -> anyhow::Result<()> {
         .with_title("voxels")
         .with_resizable(false)
         .with_inner_size(Size::new(800, 600))
-        .with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)))
         .build(&event_loop)
         .expect("could not open window");
     let window = Arc::new(window);
