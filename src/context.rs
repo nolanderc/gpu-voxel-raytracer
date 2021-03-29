@@ -676,7 +676,7 @@ impl Context {
 
             cpass.set_pipeline(&self.compute_pipeline);
             cpass.set_bind_group(0, &self.bind_groups.compute.bindings, &[]);
-            cpass.dispatch(self.output_size.width, self.output_size.height, 1);
+            cpass.dispatch(self.output_size.width / 16, self.output_size.height / 16, 1);
         }
 
         {
