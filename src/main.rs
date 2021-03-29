@@ -42,16 +42,12 @@ fn main() -> anyhow::Result<()> {
 
     init_log_subscriber();
 
-    let size = Size {
-        width: 800,
-        height: 600,
-    };
-
     let event_loop = winit::event_loop::EventLoop::new();
     let window = winit::window::WindowBuilder::new()
         .with_title("voxels")
         .with_resizable(false)
-        .with_inner_size(size)
+        .with_inner_size(Size::new(800, 600))
+        .with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)))
         .build(&event_loop)
         .expect("could not open window");
     let window = Arc::new(window);
