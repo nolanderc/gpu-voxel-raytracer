@@ -234,7 +234,7 @@ vec3 node_emmitance(int node) {
 }
 
 #define MAX_BOUNCES 4
-#define MAX_SAMPLES 10
+#define MAX_SAMPLES 1
 
 uint random_index = (gl_GlobalInvocationID.x + 17 * gl_GlobalInvocationID.y) % RANDOM_FLOAT_COUNT;
 float rand() {
