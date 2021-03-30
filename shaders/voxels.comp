@@ -4,6 +4,9 @@
 
 #define ALMOST_INFINITY (1 << 30)
 
+#define LEAF_BIT (1 << 31)
+#define EMMITANCE_BIT (1 << 30)
+
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(rgba32f, binding = 0) uniform writeonly image2D output_image;
 
@@ -21,6 +24,13 @@ layout(binding = 2) readonly buffer octree_data {
     float root_size;
     int nodes[];
 };
+
+#define RANDOM_FLOAT_COUNT 1024
+
+layout(binding = 3) readonly buffer randomness {
+    float random_floats[RANDOM_FLOAT_COUNT];
+};
+
 
 bool ray_cube_intersection(
     vec3 origin, vec3 inv_dir,
@@ -85,7 +95,10 @@ struct Frame {
 };
 
 int iterations = 0;
-bool cast_ray(vec3 ray_origin, vec3 ray_dir, out float time, out vec3 color, out vec3 normal) {
+bool cast_bounded_ray(
+    vec3 ray_origin, vec3 ray_dir, float max_distance, 
+    out float time, out int out_node, out vec3 normal
+) {
     const uint dir_mask = (ray_dir.x < 0 ? 4 : 0) | (ray_dir.y < 0 ? 2 : 0) | (ray_dir.z < 0 ? 1 : 0);
 
     const vec3 ray_inv_dir = 1.0 / ray_dir;
@@ -113,19 +126,24 @@ bool cast_ray(vec3 ray_origin, vec3 ray_dir, out float time, out vec3 color, out
 
     int value;
 
+    iterations = 0;
     while(true) {
         iterations++;
 
-        if (iterations >= 128) { 
-            color = vec3(0);
+        if (iterations >= 2048) { 
+            out_node = LEAF_BIT;
             return true;
         };
+
+        if (time > max_distance) {
+            return false;
+        }
 
         value = nodes[node + octant];
 
         if (value < 0) {
             // We found a value
-            color = vec3((value >> 16) & 0xff, (value >> 8) & 0xff, (value) & 0xff) / 255.0;
+            out_node = value;
 
             vec3 hit = ray_origin + time * ray_dir;
             vec3 octant_center = octant_center(center, size, octant);
@@ -196,40 +214,89 @@ bool cast_ray(vec3 ray_origin, vec3 ray_dir, out float time, out vec3 color, out
     }
 }
 
+bool cast_ray(vec3 ray_origin, vec3 ray_dir, out float time, out int node, out vec3 normal) {
+    return cast_bounded_ray(ray_origin, ray_dir, ALMOST_INFINITY, time, node, normal);
+}
+
+vec3 node_color(int node) {
+    float r = float((node >> 16) & 0xff);
+    float g = float((node >> 8) & 0xff);
+    float b = float(node & 0xff);
+    return vec3(r, g, b) / 255.0;
+}
+
+vec3 node_emmitance(int node) {
+    float e = float((node & EMMITANCE_BIT) != 0);
+    float r = float((node >> 16) & 0xff);
+    float g = float((node >> 8) & 0xff);
+    float b = float(node & 0xff);
+    return e * vec3(r, g, b) / 255.0;
+}
+
+#define MAX_BOUNCES 4
+#define MAX_SAMPLES 30
+
+uint random_index = (gl_GlobalInvocationID.x + 17 * gl_GlobalInvocationID.y) % RANDOM_FLOAT_COUNT;
+float rand() {
+    random_index = (random_index + 13) % RANDOM_FLOAT_COUNT;
+    return random_floats[random_index];
+}
+
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
 
-    vec3 ray_origin = camera_origin.xyz;
-    vec3 ray_dir = normalize(
+    vec3 start_ray_origin = camera_origin.xyz;
+    vec3 start_ray_dir = normalize(
         (coord.x + 0.5) * camera_right.xyz 
         - (coord.y + 0.5) * camera_up.xyz 
         + camera_forward.xyz
     );
     
-    float time;
-    vec3 color, normal;
-    bool hit = cast_ray(ray_origin, ray_dir, time, color, normal);
+    const vec3 sky = vec3(1);
 
-    vec3 out_color;
+    vec3 out_color = vec3(0);
 
-    const float ambient = 0.004;
-    if (hit) {
-        vec3 hit_point = ray_origin + ray_dir * (0.99999 * time);
+    for (int sampl = 0; sampl < MAX_SAMPLES; sampl++) {
+        vec3 ray_origin = start_ray_origin;
+        vec3 ray_dir = start_ray_dir;
 
-        vec3 light_dir = normalize(hit_point - light.xyz);
+        vec3 sample_color = vec3(0);
+        vec3 blending_factor = vec3(1);
 
-        float shadow_time;
-        vec3 shadow_color, shadow_normal;
-        bool obstructed = cast_ray(hit_point, -light_dir, shadow_time, shadow_color, shadow_normal);
-        float light_distance = distance(hit_point, light.xyz);
-        bool shadow = obstructed && shadow_time <= light_distance;
+        for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+            float time;
+            int node;
+            vec3 normal;
+            if (cast_ray(ray_origin, ray_dir, time, node, normal)) {
+                random_index += uint(node) + uint(25182951 * time);
 
-        float diffuse = light.w * max(0.0, dot(-light_dir, normal)) / pow(light_distance, 2);
-        float brightness = ambient + (shadow ? 0.2 * diffuse : diffuse);
-        out_color = color * brightness;
-    } else {
-        out_color = vec3(abs(ray_dir));
+                // hit node
+                vec3 hit_point = ray_origin + ray_dir * time;
+
+                vec3 cube = vec3(2 * rand() - 1, 2 * rand() - 1, 2 * rand() - 1);
+
+                vec3 reflect_dir = normalize(cube); // reflect(ray_dir, normal);
+                reflect_dir += normal * max(0, dot(normal, reflect_dir));
+
+                vec3 color = node_color(node);
+                vec3 emmitance = node_emmitance(node);
+
+                sample_color += emmitance * blending_factor;
+                blending_factor *= 2 * color * dot(reflect_dir, normal);
+
+                ray_origin = hit_point + 1e-5 * normal;
+                ray_dir = reflect_dir;
+            } else {
+                // hit the sky
+                sample_color += sky * blending_factor;
+                break;
+            }
+        }
+
+        out_color += sample_color;
     }
+
+    out_color /= MAX_SAMPLES;
 
     imageStore(output_image, coord, vec4(out_color, 1));
 }

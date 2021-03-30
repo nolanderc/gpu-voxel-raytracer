@@ -52,6 +52,7 @@ struct Bindings {
     uniform_buffer: Buffer<Uniforms>,
     uniforms: Uniforms,
     octree_buffer: Buffer<i32>,
+    randomness_buffer: Buffer<f32>,
     voxel_image: wgpu::Texture,
 }
 
@@ -169,7 +170,7 @@ impl Context {
         let compute_pipeline = Self::create_compute_pipeline(&gpu, &bind_groups.compute)?;
 
         let camera = crate::camera::Camera {
-            position: 2.0 * Vec3::new(0.0, 0.5, -1.0),
+            position: Vec3::new(0.3, -0.5, -0.2),
             direction: Vec3::new(0.0, -0.8, 1.0),
             fov: 70.0f32.to_radians(),
         };
@@ -318,7 +319,33 @@ impl Context {
     fn create_voxels() -> Vec<([i16; 3], [u8; 3])> {
         let mut voxels = Vec::new();
 
-        let radius = 32i32;
+        let radius = 64i32;
+
+        let width = 2 * (radius + 1) as usize;
+        let mut heights = vec![None; width.pow(2)];
+
+        for x in -radius..=radius {
+            for z in -radius..=radius {
+                let xi = (x + radius) as usize;
+                let zi = (z + radius) as usize;
+                if x.pow(2) + z.pow(2) <= radius.pow(2) {
+                    let y = -(radius.pow(2) as f32 - x.pow(2) as f32 - z.pow(2) as f32).sqrt() as i32;
+                    heights[xi + zi * width] = Some(y);
+                } else {
+                    heights[xi + zi * width] = Some(0);
+                }
+            }
+        }
+
+        let get_height = |x: i32, z: i32| {
+            if x < -radius || x > radius || z < -radius || z > radius {
+                None
+            } else {
+                let xi = (x + radius) as usize;
+                let zi = (z + radius) as usize;
+                heights[xi + zi * width]
+            }
+        };
 
         let color = |x: i32, y: i32, z: i32| {
             let red = 50 + ((200 / 7) * ((x + z) % 8)).abs() as u8;
@@ -328,17 +355,15 @@ impl Context {
         };
 
         for x in -radius..=radius {
-            for y in -radius..0 {
-                for z in -radius..=radius {
-                    let dist = radius * radius - (x * x + y * y + z * z);
-                    if 0 <= dist && dist <= 2 * radius {
-                        let c = color(x, y, z);
-
-                        let x = x as i16;
-                        let y = y as i16;
-                        let z = z as i16;
-
-                        voxels.push(([x, y, z], c));
+            for z in -radius..=radius {
+                if let Some(curr) = get_height(x, z) {
+                    let low = curr
+                        .min(get_height(x-1, z).unwrap_or(curr))
+                        .min(get_height(x+1, z).unwrap_or(curr))
+                        .min(get_height(x, z-1).unwrap_or(curr))
+                        .min(get_height(x, z+1).unwrap_or(curr));
+                    for y in low..=curr {
+                        voxels.push(([x as i16, y as i16, z as i16], color(x, y, z)));
                     }
                 }
             }
@@ -376,10 +401,16 @@ impl Context {
 
         let voxel_image = Self::create_storage_texture(gpu, output_size, Self::VOXEL_FORMAT);
 
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let randomness = (0..1024).map(|_| rng.gen_range(0.0..1.0)).collect::<Vec<_>>();
+        let randomness_buffer = Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &randomness);
+
         Bindings {
             uniform_buffer,
             uniforms,
             octree_buffer,
+            randomness_buffer,
             voxel_image,
         }
     }
@@ -445,6 +476,7 @@ impl Context {
             UniformImage(0 => (&voxel_view, WriteOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
             Uniform(1 => (&bindings.uniform_buffer) in COMPUTE),
             Storage(2 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
+            Storage(3 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
         ];
 
         BindGroup::from_entries(gpu, &layout, &bindings)
@@ -630,28 +662,34 @@ impl Context {
             self.yaw.cos() * self.pitch.cos(),
         );
 
+        let pressed = |keys: &[Key]| keys.iter().any(|key| self.pressed_keys.contains(key));
+
         let [right, _, forward] = self.camera.axis();
         let mut movement = Vec3::zero();
-        if self.pressed_keys.contains(&Key::Up) {
+
+        // I'm primarily a Dvorak user, so excuse the key bindings ;)
+        if pressed(&[Key::Up, Key::Comma]) {
             movement += forward;
         }
-        if self.pressed_keys.contains(&Key::Down) {
+        if pressed(&[Key::Down, Key::O]) {
             movement -= forward;
         }
-        if self.pressed_keys.contains(&Key::Right) {
+        if pressed(&[Key::Right, Key::E]) {
             movement += right;
         }
-        if self.pressed_keys.contains(&Key::Left) {
+        if pressed(&[Key::Left, Key::A]) {
             movement -= right;
         }
-        if self.pressed_keys.contains(&Key::PageUp) {
+        if pressed(&[Key::PageUp, Key::Period]) {
             movement.y += 1.0;
         }
-        if self.pressed_keys.contains(&Key::PageDown) {
+        if pressed(&[Key::PageDown, Key::Apostrophe]) {
             movement.y -= 1.0;
         }
         if movement != Vec3::zero() {
-            let speed = if self.pressed_keys.contains(&Key::RShift) {
+            let speed = if pressed(&[Key::LControl, Key::RControl]) {
+                0.02
+            } else if pressed(&[Key::LShift, Key::RShift]) {
                 1.0
             } else {
                 0.2
