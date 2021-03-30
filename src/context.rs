@@ -329,7 +329,8 @@ impl Context {
                 let xi = (x + radius) as usize;
                 let zi = (z + radius) as usize;
                 if x.pow(2) + z.pow(2) <= radius.pow(2) {
-                    let y = -(radius.pow(2) as f32 - x.pow(2) as f32 - z.pow(2) as f32).sqrt() as i32;
+                    let y =
+                        -(radius.pow(2) as f32 - x.pow(2) as f32 - z.pow(2) as f32).sqrt() as i32;
                     heights[xi + zi * width] = Some(y);
                 } else {
                     heights[xi + zi * width] = Some(0);
@@ -358,10 +359,10 @@ impl Context {
             for z in -radius..=radius {
                 if let Some(curr) = get_height(x, z) {
                     let low = curr
-                        .min(get_height(x-1, z).unwrap_or(curr))
-                        .min(get_height(x+1, z).unwrap_or(curr))
-                        .min(get_height(x, z-1).unwrap_or(curr))
-                        .min(get_height(x, z+1).unwrap_or(curr));
+                        .min(get_height(x - 1, z).unwrap_or(curr))
+                        .min(get_height(x + 1, z).unwrap_or(curr))
+                        .min(get_height(x, z - 1).unwrap_or(curr))
+                        .min(get_height(x, z + 1).unwrap_or(curr));
                     for y in low..=curr {
                         voxels.push(([x as i16, y as i16, z as i16], color(x, y, z)));
                     }
@@ -403,7 +404,9 @@ impl Context {
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        let randomness = (0..1024).map(|_| rng.gen_range(0.0..1.0)).collect::<Vec<_>>();
+        let randomness = (0..1024)
+            .map(|_| rng.gen_range(0.0..1.0))
+            .collect::<Vec<_>>();
         let randomness_buffer = Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &randomness);
 
         Bindings {
@@ -794,6 +797,15 @@ impl Context {
         self.bindings
             .uniform_buffer
             .write(&self.gpu, 0, &[self.bindings.uniforms]);
+
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let randomness = (0..1024)
+            .map(|_| rng.gen_range(0.0..1.0))
+            .collect::<Vec<_>>();
+        self.bindings
+            .randomness_buffer
+            .write(&self.gpu, 0, &randomness);
     }
 }
 

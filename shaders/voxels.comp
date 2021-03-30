@@ -234,11 +234,11 @@ vec3 node_emmitance(int node) {
 }
 
 #define MAX_BOUNCES 4
-#define MAX_SAMPLES 30
+#define MAX_SAMPLES 10
 
 uint random_index = (gl_GlobalInvocationID.x + 17 * gl_GlobalInvocationID.y) % RANDOM_FLOAT_COUNT;
 float rand() {
-    random_index = (random_index + 13) % RANDOM_FLOAT_COUNT;
+    random_index = (random_index + 1) % RANDOM_FLOAT_COUNT;
     return random_floats[random_index];
 }
 
@@ -271,20 +271,18 @@ void main() {
                 random_index += uint(node) + uint(25182951 * time);
 
                 // hit node
-                vec3 hit_point = ray_origin + ray_dir * time;
-
-                vec3 cube = vec3(2 * rand() - 1, 2 * rand() - 1, 2 * rand() - 1);
+                vec3 cube = vec3(rand(), rand(), rand()) * 2 - 1;
 
                 vec3 reflect_dir = normalize(cube); // reflect(ray_dir, normal);
-                reflect_dir += normal * max(0, dot(normal, reflect_dir));
+                reflect_dir -= 2 * normal * min(0, dot(normal, reflect_dir));
 
                 vec3 color = node_color(node);
                 vec3 emmitance = node_emmitance(node);
 
                 sample_color += emmitance * blending_factor;
-                blending_factor *= 2 * color * dot(reflect_dir, normal);
+                blending_factor *= color;
 
-                ray_origin = hit_point + 1e-5 * normal;
+                ray_origin += ray_dir * time + 1e-6 * normal;
                 ray_dir = reflect_dir;
             } else {
                 // hit the sky
@@ -293,7 +291,7 @@ void main() {
             }
         }
 
-        out_color += sample_color;
+        out_color += sample_color == vec3(0) ? blending_factor : sample_color;
     }
 
     out_color /= MAX_SAMPLES;
