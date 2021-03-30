@@ -1,8 +1,8 @@
 #version 450
 
 #define MAX_DEPTH 10
-#define MAX_BOUNCES 4
-#define MAX_SAMPLES 8
+#define MAX_BOUNCES 8
+#define MAX_SAMPLES 1
 
 #define ALMOST_INFINITY (1 << 30)
 
@@ -12,7 +12,7 @@
 #define PI 3.14159265358979
 
 layout(local_size_x = 16, local_size_y = 16) in;
-layout(rgba32f, binding = 0) uniform writeonly image2D output_image;
+layout(rgba32f, binding = 0) uniform image2D output_image;
 
 layout(binding = 1) uniform uniforms {
     vec4 camera_origin;
@@ -20,7 +20,8 @@ layout(binding = 1) uniform uniforms {
     vec4 camera_up;
     vec4 camera_forward;
     vec4 light;
-    float time;
+    float global_time;
+    uint still_sample;
 };
 
 layout(binding = 2) readonly buffer octree_data {
@@ -234,7 +235,7 @@ vec3 node_emmitance(int node) {
     float r = float((node >> 16) & 0xff);
     float g = float((node >> 8) & 0xff);
     float b = float(node & 0xff);
-    return e * vec3(r, g, b) / 255.0;
+    return e * 3 * vec3(r, g, b) / 255.0;
 }
 
 uint random_index = (gl_GlobalInvocationID.x * gl_GlobalInvocationID.y) % RANDOM_FLOAT_COUNT;
@@ -306,5 +307,7 @@ void main() {
 
     out_color /= MAX_SAMPLES;
 
-    imageStore(output_image, coord, vec4(out_color, 1));
+    vec3 old_color = imageLoad(output_image, coord).xyz;
+    vec3 new_color = mix(old_color, out_color, 1.0 / still_sample);
+    imageStore(output_image, coord, vec4(new_color, 1));
 }

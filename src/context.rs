@@ -91,6 +91,7 @@ struct Uniforms {
     camera_forward: Vec3A,
     light: PointLight,
     time: f32,
+    still_sample: u32,
 }
 
 #[repr(C)]
@@ -247,7 +248,7 @@ impl Context {
         gpu.device.create_swap_chain(&gpu.surface, &descriptor)
     }
 
-    fn create_octree_nodes(voxels: Vec<([i16; 3], [u8; 3])>) -> Vec<i32> {
+    fn create_octree_nodes(voxels: Vec<([i16; 3], [u8; 4])>) -> Vec<i32> {
         fn alloc_node(nodes: &mut Vec<i32>) -> usize {
             let index = nodes.len();
             nodes.extend_from_slice(&[0; 8]);
@@ -260,7 +261,7 @@ impl Context {
             mut center: [i16; 3],
             mut extent: u16,
             pos: [i16; 3],
-            color: [u8; 3],
+            color: [u8; 4],
         ) {
             loop {
                 let dx = (center[0] <= pos[0]) as usize;
@@ -269,12 +270,9 @@ impl Context {
                 let octant = 4 * dx + 2 * dy + dz;
 
                 if extent == 1 {
-                    let [r, g, b] = [color[0] as i32, color[1] as i32, color[2] as i32];
-
-                    use rand::Rng;
-                    let emissive = rand::thread_rng().gen_bool(0.05);
-
-                    nodes[current + octant] = (1 << 31) | ((emissive as i32) << 30) | (r << 16) | (g << 8) | b;
+                    let [m, r, g, b] = color;
+                    let [m, r, g, b] = [m as i32, r as i32, g as i32, b as i32];
+                    nodes[current + octant] = (1 << 31) | ((m & 0x7f) << 24) | (r << 16) | (g << 8) | b;
                     return;
                 } else {
                     let value = nodes[current + octant];
@@ -320,10 +318,10 @@ impl Context {
         nodes
     }
 
-    fn create_voxels() -> Vec<([i16; 3], [u8; 3])> {
+    fn create_voxels() -> Vec<([i16; 3], [u8; 4])> {
         let mut voxels = Vec::new();
 
-        let radius = 16i32;
+        let radius = 256i32;
 
         let width = 2 * (radius + 1) as usize;
         let mut heights = vec![None; width.pow(2)];
@@ -352,11 +350,17 @@ impl Context {
             }
         };
 
-        let color = |x: i32, y: i32, z: i32| {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let mut color = |x: i32, y: i32, z: i32| {
             let red = 50 + ((200 / 7) * ((x + z) % 8)).abs() as u8;
             let green = 50 + ((200 / radius) * y).abs() as u8;
             let blue = 50 + ((200 / 4) * ((x * z + 2 * y - 3 * x + z) % 5)).abs() as u8;
-            [red, green, blue]
+
+            let emmisive = rng.gen_bool(0.05);
+            let material = (emmisive as u8) << 6;
+
+            [material, red, green, blue]
         };
 
         for x in -radius..=radius {
@@ -375,7 +379,7 @@ impl Context {
         }
 
         for x in -radius..=radius {
-            voxels.push(([x as i16, -10, 0], [200, 200, 200]));
+            voxels.push(([x as i16, -10, 0], [0x40, 255, 255, 255]));
         }
 
         voxels
@@ -648,6 +652,7 @@ impl Context {
                 DeviceEvent::MouseMotion { delta: (dx, dy) } => {
                     self.yaw += 0.001 * dx as f32;
                     self.pitch -= 0.001 * dy as f32;
+                    self.bindings.uniforms.still_sample = 0;
                 }
                 _ => {}
             },
@@ -702,6 +707,7 @@ impl Context {
                 0.2
             };
             self.camera.position += speed * dt * movement.norm();
+            self.bindings.uniforms.still_sample = 0;
         }
     }
 
@@ -795,6 +801,7 @@ impl Context {
             camera_up: Vec3A::from(camera_up),
             camera_forward: Vec3A::from(camera_forward),
             time,
+            still_sample: self.bindings.uniforms.still_sample + 1,
             ..self.bindings.uniforms
         };
 
