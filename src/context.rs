@@ -270,7 +270,11 @@ impl Context {
 
                 if extent == 1 {
                     let [r, g, b] = [color[0] as i32, color[1] as i32, color[2] as i32];
-                    nodes[current + octant] = (1 << 31) | (r << 16) | (g << 8) | b;
+
+                    use rand::Rng;
+                    let emissive = rand::thread_rng().gen_bool(0.05);
+
+                    nodes[current + octant] = (1 << 31) | ((emissive as i32) << 30) | (r << 16) | (g << 8) | b;
                     return;
                 } else {
                     let value = nodes[current + octant];
@@ -319,7 +323,7 @@ impl Context {
     fn create_voxels() -> Vec<([i16; 3], [u8; 3])> {
         let mut voxels = Vec::new();
 
-        let radius = 64i32;
+        let radius = 16i32;
 
         let width = 2 * (radius + 1) as usize;
         let mut heights = vec![None; width.pow(2)];
@@ -404,7 +408,7 @@ impl Context {
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        let randomness = (0..1024)
+        let randomness = (0..(1 << 16))
             .map(|_| rng.gen_range(0.0..1.0))
             .collect::<Vec<_>>();
         let randomness_buffer = Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &randomness);
@@ -718,8 +722,8 @@ impl Context {
             cpass.set_pipeline(&self.compute_pipeline);
             cpass.set_bind_group(0, &self.bind_groups.compute.bindings, &[]);
 
-            let local_x = 4;
-            let local_y = 4;
+            let local_x = 16;
+            let local_y = 16;
             let groups_x = (self.output_size.width + local_x - 1) / local_x;
             let groups_y = (self.output_size.height + local_y - 1) / local_y;
             cpass.dispatch(groups_x, groups_y, 1);
@@ -800,7 +804,7 @@ impl Context {
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        let randomness = (0..1024)
+        let randomness = (0..(1 << 16))
             .map(|_| rng.gen_range(0.0..1.0))
             .collect::<Vec<_>>();
         self.bindings
