@@ -1,6 +1,6 @@
 #version 450
 
-#define MAX_DEPTH 10
+#define MAX_DEPTH 15
 #define MAX_BOUNCES 8
 #define MAX_SAMPLES 1
 
@@ -235,7 +235,7 @@ vec3 node_emmitance(int node) {
     float r = float((node >> 16) & 0xff);
     float g = float((node >> 8) & 0xff);
     float b = float(node & 0xff);
-    return e * 3 * vec3(r, g, b) / 255.0;
+    return e * 4 * vec3(r, g, b) / 255.0;
 }
 
 uint random_index = (gl_GlobalInvocationID.x * gl_GlobalInvocationID.y) % RANDOM_FLOAT_COUNT;
@@ -247,20 +247,17 @@ float rand() {
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
 
-    vec3 start_ray_origin = camera_origin.xyz;
-    vec3 start_ray_dir = normalize(
-        (coord.x + 0.5) * camera_right.xyz 
-        - (coord.y + 0.5) * camera_up.xyz 
-        + camera_forward.xyz
-    );
-    
     const vec3 sky = vec3(0.0);
 
     vec3 out_color = vec3(0);
 
     for (int sampl = 0; sampl < MAX_SAMPLES; sampl++) {
-        vec3 ray_origin = start_ray_origin;
-        vec3 ray_dir = start_ray_dir;
+        vec3 ray_origin = camera_origin.xyz;
+        vec3 ray_dir = normalize(
+            (coord.x + rand()) * camera_right.xyz 
+            - (coord.y + rand()) * camera_up.xyz 
+            + camera_forward.xyz
+        );
 
         vec3 sample_color = vec3(0);
         vec3 blending_factor = vec3(1);

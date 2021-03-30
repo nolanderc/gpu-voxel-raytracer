@@ -171,8 +171,8 @@ impl Context {
         let compute_pipeline = Self::create_compute_pipeline(&gpu, &bind_groups.compute)?;
 
         let camera = crate::camera::Camera {
-            position: Vec3::new(0.3, -0.5, -0.2),
-            direction: Vec3::new(0.0, -0.8, 1.0),
+            position: Vec3::new(0.0, 0.0, -2.0),
+            direction: Vec3::new(0.0, 0.0, 1.0),
             fov: 70.0f32.to_radians(),
         };
 
@@ -320,6 +320,19 @@ impl Context {
 
     fn create_voxels() -> Vec<([i16; 3], [u8; 4])> {
         let mut voxels = Vec::new();
+        
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let mut color = |p: f32, x: i32, y: i32, z: i32| {
+            let red = 50 + ((200 / 7) * ((x + z) % 8)).abs() as u8;
+            let green = 50 + ((200 / 8) * y).abs() as u8;
+            let blue = 50 + ((200 / 4) * ((x * z + 2 * y - 3 * x + z) % 5)).abs() as u8;
+
+            let emmisive = rng.gen_bool(p as f64);
+            let material = (emmisive as u8) << 6;
+
+            [material, red, green, blue]
+        };
 
         let radius = 256i32;
 
@@ -350,19 +363,6 @@ impl Context {
             }
         };
 
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let mut color = |x: i32, y: i32, z: i32| {
-            let red = 50 + ((200 / 7) * ((x + z) % 8)).abs() as u8;
-            let green = 50 + ((200 / radius) * y).abs() as u8;
-            let blue = 50 + ((200 / 4) * ((x * z + 2 * y - 3 * x + z) % 5)).abs() as u8;
-
-            let emmisive = rng.gen_bool(0.05);
-            let material = (emmisive as u8) << 6;
-
-            [material, red, green, blue]
-        };
-
         for x in -radius..=radius {
             for z in -radius..=radius {
                 if let Some(curr) = get_height(x, z) {
@@ -372,7 +372,7 @@ impl Context {
                         .min(get_height(x, z - 1).unwrap_or(curr))
                         .min(get_height(x, z + 1).unwrap_or(curr));
                     for y in low..=curr {
-                        voxels.push(([x as i16, y as i16, z as i16], color(x, y, z)));
+                        voxels.push(([x as i16, y as i16, z as i16], color(0.01, x, y, z)));
                     }
                 }
             }
@@ -578,6 +578,7 @@ impl Context {
         info!("recreating compute pipeline");
         self.compute_pipeline =
             Self::create_compute_pipeline(&self.gpu, &self.bind_groups.compute)?;
+        self.bindings.uniforms.still_sample = 0;
         Ok(())
     }
 }
