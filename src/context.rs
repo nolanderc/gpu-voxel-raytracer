@@ -718,8 +718,8 @@ impl Context {
             cpass.set_pipeline(&self.compute_pipeline);
             cpass.set_bind_group(0, &self.bind_groups.compute.bindings, &[]);
 
-            let local_x = 16;
-            let local_y = 16;
+            let local_x = 4;
+            let local_y = 4;
             let groups_x = (self.output_size.width + local_x - 1) / local_x;
             let groups_y = (self.output_size.height + local_y - 1) / local_y;
             cpass.dispatch(groups_x, groups_y, 1);

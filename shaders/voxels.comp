@@ -7,7 +7,7 @@
 #define LEAF_BIT (1 << 31)
 #define EMMITANCE_BIT (1 << 30)
 
-layout(local_size_x = 16, local_size_y = 16) in;
+layout(local_size_x = 4, local_size_y = 4) in;
 layout(rgba32f, binding = 0) uniform writeonly image2D output_image;
 
 layout(binding = 1) uniform uniforms {
