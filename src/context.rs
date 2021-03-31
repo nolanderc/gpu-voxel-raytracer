@@ -330,7 +330,7 @@ impl Context {
     fn create_voxels() -> Vec<([i16; 3], [u8; 4])> {
         let mut voxels = Vec::new();
 
-        let radius = 256i32;
+        let radius = 16i32;
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
