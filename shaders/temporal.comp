@@ -1,0 +1,53 @@
+#version 450
+
+layout(rgba32f, binding = 0) uniform image2D old_image;
+layout(rgba32f, binding = 1) uniform image2D new_image;
+
+layout(binding = 2) uniform old_uniforms {
+    vec4 old_camera_origin;
+    vec4 old_camera_right;
+    vec4 old_camera_up;
+    vec4 old_camera_forward;
+};
+
+layout(binding = 3) uniform new_uniforms {
+    vec4 new_camera_origin;
+    vec4 new_camera_right;
+    vec4 new_camera_up;
+    vec4 new_camera_forward;
+};
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    
+    mat4 new_screen_to_world = mat4(
+        new_camera_right,
+        new_camera_up,
+        new_camera_forward,
+        new_camera_origin
+    );
+
+    mat4 old_screen_to_world = mat4(
+        old_camera_right,
+        old_camera_up,
+        old_camera_forward,
+        old_camera_origin
+    );
+
+    // Convert: 
+    // new screen space -> world space -> old screen space
+    vec4 new_screen = vec4(coord.x, -coord.y, 1, 1);
+    vec4 new_world = new_screen_to_world * new_screen;
+    vec4 old_screen = inverse(old_screen_to_world) * new_world;
+    ivec2 old_coord = ivec2(old_screen.x, old_screen.y);
+    
+    ivec2 size = imageSize(old_image);
+    
+    vec4 old_color = vec4(0);
+    if (0 <= old_coord.x && old_coord.x < size && 0 <= old_coord.y && old_coord.y < size.y) {
+        old_color = imageLoad(old_image, old_coord);
+    }
+
+    imageStore(new_image, coord, old_color);
+}
+
