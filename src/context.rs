@@ -54,8 +54,12 @@ struct Bindings {
     uniforms: Uniforms,
     octree_buffer: Buffer<i32>,
     randomness_buffer: Buffer<f32>,
+
     voxel_output_image: wgpu::Texture,
     voxel_temporal_image: wgpu::Texture,
+
+    voxel_old_positions: wgpu::Texture,
+    voxel_new_positions: wgpu::Texture,
 }
 
 struct BindGroups {
@@ -208,6 +212,7 @@ impl Context {
 
     pub const SWAP_CHAIN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
     pub const VOXEL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+    pub const POSITION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
     async fn create_gpu_context(window: &winit::window::Window) -> anyhow::Result<GpuContext> {
         let backends = wgpu::BackendBit::PRIMARY;
@@ -417,6 +422,11 @@ impl Context {
         let voxel_temporal_image =
             Self::create_storage_texture(gpu, output_size, Self::VOXEL_FORMAT);
 
+        let voxel_old_positions =
+            Self::create_storage_texture(gpu, output_size, Self::POSITION_FORMAT);
+        let voxel_new_positions =
+            Self::create_storage_texture(gpu, output_size, Self::POSITION_FORMAT);
+
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let randomness = (0..(1 << 16))
@@ -430,8 +440,12 @@ impl Context {
             uniforms,
             octree_buffer,
             randomness_buffer,
+
             voxel_output_image,
             voxel_temporal_image,
+
+            voxel_old_positions,
+            voxel_new_positions,
         }
     }
 
@@ -494,14 +508,18 @@ impl Context {
     fn create_voxel_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
         let temporal_view = Self::view(&bindings.voxel_temporal_image);
         let voxel_view = Self::view(&bindings.voxel_output_image);
+        let old_position_view = Self::view(&bindings.voxel_old_positions);
+        let new_position_view = Self::view(&bindings.voxel_new_positions);
 
         let (layout, bindings) = bind_group![
             UniformImage(0 => (&temporal_view, ReadOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
             UniformImage(1 => (&voxel_view, WriteOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
-            Uniform(2 => (&bindings.uniform_buffer) in COMPUTE),
-            Storage(3 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
-            Storage(4 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
+            UniformImage(2 => (&old_position_view, ReadOnly, Self::POSITION_FORMAT, D2) in COMPUTE),
+            UniformImage(3 => (&new_position_view, WriteOnly, Self::POSITION_FORMAT, D2) in COMPUTE),
+            Uniform(4 => (&bindings.uniform_buffer) in COMPUTE),
             Uniform(5 => (&bindings.old_uniform_buffer) in COMPUTE),
+            Storage(6 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
+            Storage(7 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
         ];
 
         BindGroup::from_entries(gpu, &layout, &bindings)
@@ -727,6 +745,31 @@ impl Context {
         }
     }
 
+    fn copy_entire_texture_to_texture(
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        size: crate::Size,
+    ) {
+        encoder.copy_texture_to_texture(
+            wgpu::TextureCopyView {
+                texture: source,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+            },
+            wgpu::TextureCopyView {
+                texture: destination,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+            },
+            wgpu::Extent3d {
+                width: size.width,
+                height: size.height,
+                depth: 1,
+            },
+        );
+    }
+
     pub async fn render(&mut self) -> anyhow::Result<()> {
         let output = self.get_next_frame()?;
 
@@ -751,22 +794,18 @@ impl Context {
             cpass.dispatch(groups_x, groups_y, 1);
         }
 
-        encoder.copy_texture_to_texture(
-            wgpu::TextureCopyView {
-                texture: &self.bindings.voxel_output_image,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-            },
-            wgpu::TextureCopyView {
-                texture: &self.bindings.voxel_temporal_image,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-            },
-            wgpu::Extent3d {
-                width: self.output_size.width,
-                height: self.output_size.height,
-                depth: 1,
-            },
+        Self::copy_entire_texture_to_texture(
+            &mut encoder,
+            &self.bindings.voxel_output_image,
+            &self.bindings.voxel_temporal_image,
+            self.output_size,
+        );
+
+        Self::copy_entire_texture_to_texture(
+            &mut encoder,
+            &self.bindings.voxel_new_positions,
+            &self.bindings.voxel_old_positions,
+            self.output_size,
         );
 
         {
