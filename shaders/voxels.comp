@@ -1,7 +1,7 @@
 #version 450
 
 #define MAX_DEPTH 15
-#define MAX_BOUNCES 8
+#define MAX_BOUNCES 4
 #define MAX_SAMPLES 1
 
 #define ALMOST_INFINITY (1 << 30)
@@ -282,7 +282,7 @@ void main() {
                 reflect_dir -= normal * min(0, 2 * dot(normal, reflect_dir));
 
                 vec3 reflection = reflect(ray_dir, normal);
-                reflect_dir = normalize(mix(reflect_dir, reflection, 0.15));
+                reflect_dir = normalize(mix(reflect_dir, reflection, 0));
 
                 vec3 color = node_color(node);
                 vec3 emmitance = node_emmitance(node);

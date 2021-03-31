@@ -320,21 +320,21 @@ impl Context {
 
     fn create_voxels() -> Vec<([i16; 3], [u8; 4])> {
         let mut voxels = Vec::new();
+
+        let radius = 256i32;
         
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        let mut color = |p: f32, x: i32, y: i32, z: i32| {
-            let red = 50 + ((200 / 7) * ((x + z) % 8)).abs() as u8;
-            let green = 50 + ((200 / 8) * y).abs() as u8;
-            let blue = 50 + ((200 / 4) * ((x * z + 2 * y - 3 * x + z) % 5)).abs() as u8;
+        let mut color = |p: f32, _x: i32, _y: i32, _z: i32| {
+            let red = rng.gen_range(50..=255);
+            let green = rng.gen_range(50..=255);
+            let blue = rng.gen_range(50..=255);
 
             let emmisive = rng.gen_bool(p as f64);
             let material = (emmisive as u8) << 6;
 
             [material, red, green, blue]
         };
-
-        let radius = 256i32;
 
         let width = 2 * (radius + 1) as usize;
         let mut heights = vec![None; width.pow(2)];
