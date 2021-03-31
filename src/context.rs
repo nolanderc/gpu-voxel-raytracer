@@ -19,7 +19,6 @@ pub(crate) struct Context {
 
     pipeline: wgpu::RenderPipeline,
     voxel_pipeline: wgpu::ComputePipeline,
-    temporal_pipeline: wgpu::ComputePipeline,
 
     bindings: Bindings,
     bind_groups: BindGroups,
@@ -62,7 +61,6 @@ struct Bindings {
 struct BindGroups {
     render: BindGroup,
     voxel: BindGroup,
-    temporal: BindGroup,
 }
 
 struct BindGroup {
@@ -173,7 +171,6 @@ impl Context {
 
         let pipeline = Self::create_render_pipeline(&gpu, &bind_groups.render)?;
         let voxel_pipeline = Self::create_voxel_pipeline(&gpu, &bind_groups.voxel)?;
-        let temporal_pipeline = Self::create_temporal_pipeline(&gpu, &bind_groups.temporal)?;
 
         let camera = crate::camera::Camera {
             position: Vec3::new(0.0, 0.0, -2.0),
@@ -195,7 +192,6 @@ impl Context {
 
             pipeline,
             voxel_pipeline,
-            temporal_pipeline,
 
             start: std::time::Instant::now(),
             stopwatch: Stopwatch::new(),
@@ -478,7 +474,6 @@ impl Context {
         BindGroups {
             render: Self::create_render_bind_group(gpu, bindings),
             voxel: Self::create_voxel_bind_group(gpu, bindings),
-            temporal: Self::create_temporal_bind_group(gpu, bindings),
         }
     }
 
@@ -512,20 +507,6 @@ impl Context {
         BindGroup::from_entries(gpu, &layout, &bindings)
     }
 
-    fn create_temporal_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
-        let voxel_view = Self::view(&bindings.voxel_output_image);
-        let temporal_view = Self::view(&bindings.voxel_temporal_image);
-
-        let (layout, bindings) = bind_group![
-            UniformImage(0 => (&voxel_view, ReadOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
-            UniformImage(1 => (&temporal_view, WriteOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
-            Uniform(2 => (&bindings.old_uniform_buffer) in COMPUTE),
-            Uniform(3 => (&bindings.uniform_buffer) in COMPUTE),
-        ];
-
-        BindGroup::from_entries(gpu, &layout, &bindings)
-    }
-
     fn create_voxel_pipeline(
         gpu: &GpuContext,
         bind_group: &BindGroup,
@@ -546,32 +527,6 @@ impl Context {
                 label: None,
                 layout: Some(&layout),
                 module: &voxel_module,
-                entry_point: "main",
-            });
-
-        Ok(pipeline)
-    }
-
-    fn create_temporal_pipeline(
-        gpu: &GpuContext,
-        bind_group: &BindGroup,
-    ) -> anyhow::Result<wgpu::ComputePipeline> {
-        let temporal_module = shader::create_shader_module(gpu, "shaders/temporal.comp")?;
-
-        let layout = gpu
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: None,
-                bind_group_layouts: &[&bind_group.layout],
-                push_constant_ranges: &[],
-            });
-
-        let pipeline = gpu
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: None,
-                layout: Some(&layout),
-                module: &temporal_module,
                 entry_point: "main",
             });
 
@@ -637,10 +592,6 @@ impl Context {
 
         info!("recreating voxel pipeline");
         self.voxel_pipeline = Self::create_voxel_pipeline(&self.gpu, &self.bind_groups.voxel)?;
-
-        info!("recreating temporal pipeline");
-        self.temporal_pipeline =
-            Self::create_temporal_pipeline(&self.gpu, &self.bind_groups.temporal)?;
 
         self.bindings.uniforms.still_sample = 0;
         Ok(())
@@ -794,10 +745,6 @@ impl Context {
             let local_y = 16;
             let groups_x = (self.output_size.width + local_x - 1) / local_x;
             let groups_y = (self.output_size.height + local_y - 1) / local_y;
-
-            // cpass.set_pipeline(&self.temporal_pipeline);
-            // cpass.set_bind_group(0, &self.bind_groups.temporal.bindings, &[]);
-            // cpass.dispatch(groups_x, groups_y, 1);
 
             cpass.set_pipeline(&self.voxel_pipeline);
             cpass.set_bind_group(0, &self.bind_groups.voxel.bindings, &[]);

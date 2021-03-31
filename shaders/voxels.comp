@@ -318,25 +318,27 @@ void main() {
 
     out_color /= MAX_SAMPLES;
 
-    vec4 old_color = vec4(0,0,0,0.5);
+    vec4 old_color = vec4(0);
 
-    mat4 old_screen_to_world = mat4(
-            vec4(old_camera_right.xyz, 0),
-            vec4(old_camera_up.xyz, 0),
-            vec4(old_camera_forward.xyz, 0),
-            vec4(old_camera_origin.xyz, 1)
-            );
+    if (hit) {
+        mat4 old_screen_to_world = mat4(
+                vec4(old_camera_right.xyz, 0),
+                vec4(old_camera_up.xyz, 0),
+                vec4(old_camera_forward.xyz, 0),
+                vec4(old_camera_origin.xyz, 1)
+                );
 
-    vec4 old_screen = inverse(old_screen_to_world) * vec4(world_pos, 1);
-    // old_screen = new_screen;
-    old_screen.xyz /= old_screen.z;
-    ivec2 old_coord = ivec2(old_screen.x, -old_screen.y);
+        vec4 old_screen = inverse(old_screen_to_world) * vec4(world_pos, 1);
+        // old_screen = new_screen;
+        old_screen.xyz /= old_screen.z;
+        ivec2 old_coord = ivec2(old_screen.x, -old_screen.y);
 
-    ivec2 size = imageSize(temporal_image);
-    if (0 <= old_coord.x && old_coord.x < size.x && 0 <= old_coord.y && old_coord.y < size.y) {
-        old_color = imageLoad(temporal_image, old_coord);
-    } else {
-        old_color.a = 1;
+        ivec2 size = imageSize(temporal_image);
+        if (0 <= old_coord.x && old_coord.x < size.x && 0 <= old_coord.y && old_coord.y < size.y) {
+            old_color = imageLoad(temporal_image, old_coord);
+        } else {
+            old_color.a = 1;
+        }
     }
 
     vec3 new_color = hit ? mix(old_color.rgb, out_color, old_color.a) : vec3(0);
