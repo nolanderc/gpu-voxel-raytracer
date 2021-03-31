@@ -12,9 +12,11 @@
 #define PI 3.14159265358979
 
 layout(local_size_x = 16, local_size_y = 16) in;
-layout(rgba32f, binding = 0) uniform image2D output_image;
 
-layout(binding = 1) uniform uniforms {
+layout(rgba32f, binding = 0) uniform readonly image2D temporal_image;
+layout(rgba32f, binding = 1) uniform writeonly image2D output_image;
+
+layout(binding = 2) uniform uniforms {
     vec4 camera_origin;
     vec4 camera_right;
     vec4 camera_up;
@@ -24,7 +26,14 @@ layout(binding = 1) uniform uniforms {
     uint still_sample;
 };
 
-layout(binding = 2) readonly buffer octree_data {
+layout(binding = 5) uniform old_uniforms {
+    vec4 old_camera_origin;
+    vec4 old_camera_right;
+    vec4 old_camera_up;
+    vec4 old_camera_forward;
+};
+
+layout(binding = 3) readonly buffer octree_data {
     vec3 root_center;
     float root_size;
     int nodes[];
@@ -32,7 +41,7 @@ layout(binding = 2) readonly buffer octree_data {
 
 #define RANDOM_FLOAT_COUNT (1 << 16)
 
-layout(binding = 3) readonly buffer randomness {
+layout(binding = 4) readonly buffer randomness {
     float random_floats[RANDOM_FLOAT_COUNT];
 };
 
@@ -250,6 +259,8 @@ void main() {
     const vec3 sky = vec3(0.0);
 
     vec3 out_color = vec3(0);
+    vec3 world_pos;
+    bool hit = false;
 
     for (int sampl = 0; sampl < MAX_SAMPLES; sampl++) {
         vec3 ray_origin = camera_origin.xyz;
@@ -267,6 +278,9 @@ void main() {
             int node;
             vec3 normal;
             if (cast_ray(ray_origin, ray_dir, time, node, normal)) {
+                world_pos = !hit ? ray_origin + ray_dir * time : world_pos;
+                hit = true;
+
                 random_index += uint(node) + uint(25182951 * time);
 
                 // hit node
@@ -304,7 +318,27 @@ void main() {
 
     out_color /= MAX_SAMPLES;
 
-    vec3 old_color = imageLoad(output_image, coord).xyz;
-    vec3 new_color = mix(old_color, out_color, 1.0 / still_sample);
-    imageStore(output_image, coord, vec4(new_color, 1));
+    vec4 old_color = vec4(0,0,0,0.5);
+
+    mat4 old_screen_to_world = mat4(
+            vec4(old_camera_right.xyz, 0),
+            vec4(old_camera_up.xyz, 0),
+            vec4(old_camera_forward.xyz, 0),
+            vec4(old_camera_origin.xyz, 1)
+            );
+
+    vec4 old_screen = inverse(old_screen_to_world) * vec4(world_pos, 1);
+    // old_screen = new_screen;
+    old_screen.xyz /= old_screen.z;
+    ivec2 old_coord = ivec2(old_screen.x, -old_screen.y);
+
+    ivec2 size = imageSize(temporal_image);
+    if (0 <= old_coord.x && old_coord.x < size.x && 0 <= old_coord.y && old_coord.y < size.y) {
+        old_color = imageLoad(temporal_image, old_coord);
+    } else {
+        old_color.a = 1;
+    }
+
+    vec3 new_color = hit ? mix(old_color.rgb, out_color, old_color.a) : vec3(0);
+    imageStore(output_image, coord, vec4(new_color, max(0.075, old_color.a / 1.5)));
 }

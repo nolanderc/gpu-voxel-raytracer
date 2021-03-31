@@ -18,7 +18,8 @@ pub(crate) struct Context {
     output_size: crate::Size,
 
     pipeline: wgpu::RenderPipeline,
-    compute_pipeline: wgpu::ComputePipeline,
+    voxel_pipeline: wgpu::ComputePipeline,
+    temporal_pipeline: wgpu::ComputePipeline,
 
     bindings: Bindings,
     bind_groups: BindGroups,
@@ -49,16 +50,19 @@ pub(crate) struct GpuContext {
 }
 
 struct Bindings {
+    old_uniform_buffer: Buffer<Uniforms>,
     uniform_buffer: Buffer<Uniforms>,
     uniforms: Uniforms,
     octree_buffer: Buffer<i32>,
     randomness_buffer: Buffer<f32>,
-    voxel_image: wgpu::Texture,
+    voxel_output_image: wgpu::Texture,
+    voxel_temporal_image: wgpu::Texture,
 }
 
 struct BindGroups {
     render: BindGroup,
-    compute: BindGroup,
+    voxel: BindGroup,
+    temporal: BindGroup,
 }
 
 struct BindGroup {
@@ -168,7 +172,8 @@ impl Context {
         let bind_groups = Self::create_bind_groups(&gpu, &bindings);
 
         let pipeline = Self::create_render_pipeline(&gpu, &bind_groups.render)?;
-        let compute_pipeline = Self::create_compute_pipeline(&gpu, &bind_groups.compute)?;
+        let voxel_pipeline = Self::create_voxel_pipeline(&gpu, &bind_groups.voxel)?;
+        let temporal_pipeline = Self::create_temporal_pipeline(&gpu, &bind_groups.temporal)?;
 
         let camera = crate::camera::Camera {
             position: Vec3::new(0.0, 0.0, -2.0),
@@ -187,8 +192,10 @@ impl Context {
 
             bindings,
             bind_groups,
+
             pipeline,
-            compute_pipeline,
+            voxel_pipeline,
+            temporal_pipeline,
 
             start: std::time::Instant::now(),
             stopwatch: Stopwatch::new(),
@@ -272,7 +279,8 @@ impl Context {
                 if extent == 1 {
                     let [m, r, g, b] = color;
                     let [m, r, g, b] = [m as i32, r as i32, g as i32, b as i32];
-                    nodes[current + octant] = (1 << 31) | ((m & 0x7f) << 24) | (r << 16) | (g << 8) | b;
+                    nodes[current + octant] =
+                        (1 << 31) | ((m & 0x7f) << 24) | (r << 16) | (g << 8) | b;
                     return;
                 } else {
                     let value = nodes[current + octant];
@@ -322,7 +330,7 @@ impl Context {
         let mut voxels = Vec::new();
 
         let radius = 256i32;
-        
+
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let mut color = |p: f32, _x: i32, _y: i32, _z: i32| {
@@ -395,6 +403,7 @@ impl Context {
         };
 
         let uniform_buffer = Buffer::new(gpu, Usage::UNIFORM | Usage::COPY_DST, &[uniforms]);
+        let old_uniform_buffer = Buffer::new(gpu, Usage::UNIFORM | Usage::COPY_DST, &[uniforms]);
 
         let mut octree = vec![
             f32::to_bits(0.0) as i32,
@@ -408,7 +417,9 @@ impl Context {
 
         let octree_buffer = Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &octree);
 
-        let voxel_image = Self::create_storage_texture(gpu, output_size, Self::VOXEL_FORMAT);
+        let voxel_output_image = Self::create_storage_texture(gpu, output_size, Self::VOXEL_FORMAT);
+        let voxel_temporal_image =
+            Self::create_storage_texture(gpu, output_size, Self::VOXEL_FORMAT);
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -418,11 +429,13 @@ impl Context {
         let randomness_buffer = Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &randomness);
 
         Bindings {
+            old_uniform_buffer,
             uniform_buffer,
             uniforms,
             octree_buffer,
             randomness_buffer,
-            voxel_image,
+            voxel_output_image,
+            voxel_temporal_image,
         }
     }
 
@@ -431,11 +444,12 @@ impl Context {
         size: crate::Size,
         format: wgpu::TextureFormat,
     ) -> wgpu::Texture {
+        use wgpu::TextureUsage as Usage;
         Self::create_texture(
             gpu,
             size,
             format,
-            wgpu::TextureUsage::COPY_SRC | wgpu::TextureUsage::STORAGE,
+            Usage::COPY_SRC | Usage::COPY_DST | Usage::STORAGE,
         )
     }
 
@@ -463,12 +477,13 @@ impl Context {
     fn create_bind_groups(gpu: &GpuContext, bindings: &Bindings) -> BindGroups {
         BindGroups {
             render: Self::create_render_bind_group(gpu, bindings),
-            compute: Self::create_compute_bind_group(gpu, bindings),
+            voxel: Self::create_voxel_bind_group(gpu, bindings),
+            temporal: Self::create_temporal_bind_group(gpu, bindings),
         }
     }
 
     fn create_render_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
-        let voxel_view = Self::view(&bindings.voxel_image);
+        let voxel_view = Self::view(&bindings.voxel_output_image);
         let (layout, bindings) = bind_group![
             UniformImage(0 => (&voxel_view, ReadOnly, Self::VOXEL_FORMAT, D2) in FRAGMENT),
             // Uniform(0 => (bindings.uniform_buffer) in wgpu::ShaderStage::FRAGMENT),
@@ -481,23 +496,41 @@ impl Context {
         texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    fn create_compute_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
-        let voxel_view = Self::view(&bindings.voxel_image);
+    fn create_voxel_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
+        let temporal_view = Self::view(&bindings.voxel_temporal_image);
+        let voxel_view = Self::view(&bindings.voxel_output_image);
+
         let (layout, bindings) = bind_group![
-            UniformImage(0 => (&voxel_view, WriteOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
-            Uniform(1 => (&bindings.uniform_buffer) in COMPUTE),
-            Storage(2 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
-            Storage(3 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
+            UniformImage(0 => (&temporal_view, ReadOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
+            UniformImage(1 => (&voxel_view, WriteOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
+            Uniform(2 => (&bindings.uniform_buffer) in COMPUTE),
+            Storage(3 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
+            Storage(4 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
+            Uniform(5 => (&bindings.old_uniform_buffer) in COMPUTE),
         ];
 
         BindGroup::from_entries(gpu, &layout, &bindings)
     }
 
-    fn create_compute_pipeline(
+    fn create_temporal_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
+        let voxel_view = Self::view(&bindings.voxel_output_image);
+        let temporal_view = Self::view(&bindings.voxel_temporal_image);
+
+        let (layout, bindings) = bind_group![
+            UniformImage(0 => (&voxel_view, ReadOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
+            UniformImage(1 => (&temporal_view, WriteOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
+            Uniform(2 => (&bindings.old_uniform_buffer) in COMPUTE),
+            Uniform(3 => (&bindings.uniform_buffer) in COMPUTE),
+        ];
+
+        BindGroup::from_entries(gpu, &layout, &bindings)
+    }
+
+    fn create_voxel_pipeline(
         gpu: &GpuContext,
         bind_group: &BindGroup,
     ) -> anyhow::Result<wgpu::ComputePipeline> {
-        let compute_module = shader::create_shader_module(gpu, "shaders/voxels.comp")?;
+        let voxel_module = shader::create_shader_module(gpu, "shaders/voxels.comp")?;
 
         let layout = gpu
             .device
@@ -512,7 +545,33 @@ impl Context {
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: None,
                 layout: Some(&layout),
-                module: &compute_module,
+                module: &voxel_module,
+                entry_point: "main",
+            });
+
+        Ok(pipeline)
+    }
+
+    fn create_temporal_pipeline(
+        gpu: &GpuContext,
+        bind_group: &BindGroup,
+    ) -> anyhow::Result<wgpu::ComputePipeline> {
+        let temporal_module = shader::create_shader_module(gpu, "shaders/temporal.comp")?;
+
+        let layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[&bind_group.layout],
+                push_constant_ranges: &[],
+            });
+
+        let pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: Some(&layout),
+                module: &temporal_module,
                 entry_point: "main",
             });
 
@@ -575,9 +634,14 @@ impl Context {
     fn recreate_pipeline(&mut self) -> anyhow::Result<()> {
         info!("recreating render pipeline");
         self.pipeline = Self::create_render_pipeline(&self.gpu, &self.bind_groups.render)?;
-        info!("recreating compute pipeline");
-        self.compute_pipeline =
-            Self::create_compute_pipeline(&self.gpu, &self.bind_groups.compute)?;
+
+        info!("recreating voxel pipeline");
+        self.voxel_pipeline = Self::create_voxel_pipeline(&self.gpu, &self.bind_groups.voxel)?;
+
+        info!("recreating temporal pipeline");
+        self.temporal_pipeline =
+            Self::create_temporal_pipeline(&self.gpu, &self.bind_groups.temporal)?;
+
         self.bindings.uniforms.still_sample = 0;
         Ok(())
     }
@@ -726,15 +790,37 @@ impl Context {
             let mut cpass =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
 
-            cpass.set_pipeline(&self.compute_pipeline);
-            cpass.set_bind_group(0, &self.bind_groups.compute.bindings, &[]);
-
             let local_x = 16;
             let local_y = 16;
             let groups_x = (self.output_size.width + local_x - 1) / local_x;
             let groups_y = (self.output_size.height + local_y - 1) / local_y;
+
+            // cpass.set_pipeline(&self.temporal_pipeline);
+            // cpass.set_bind_group(0, &self.bind_groups.temporal.bindings, &[]);
+            // cpass.dispatch(groups_x, groups_y, 1);
+
+            cpass.set_pipeline(&self.voxel_pipeline);
+            cpass.set_bind_group(0, &self.bind_groups.voxel.bindings, &[]);
             cpass.dispatch(groups_x, groups_y, 1);
         }
+
+        encoder.copy_texture_to_texture(
+            wgpu::TextureCopyView {
+                texture: &self.bindings.voxel_output_image,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+            },
+            wgpu::TextureCopyView {
+                texture: &self.bindings.voxel_temporal_image,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+            },
+            wgpu::Extent3d {
+                width: self.output_size.width,
+                height: self.output_size.height,
+                depth: 1,
+            },
+        );
 
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -795,6 +881,10 @@ impl Context {
         let time = self.start.elapsed().as_secs_f32();
 
         let [camera_right, camera_up, camera_forward] = self.camera.axis_scaled(self.output_size);
+
+        self.bindings
+            .old_uniform_buffer
+            .write(&self.gpu, 0, &[self.bindings.uniforms]);
 
         self.bindings.uniforms = Uniforms {
             camera_origin: self.camera.position.into(),
