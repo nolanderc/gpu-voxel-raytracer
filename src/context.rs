@@ -314,14 +314,14 @@ impl Context {
             }
         }
 
-        let mut extent = 1u16;
+        let mut extent = 0u16;
         for ([x, y, z], _) in voxels.iter() {
             extent = extent
                 .max(x.abs() as u16)
                 .max(y.abs() as u16)
                 .max(z.abs() as u16);
         }
-        let extent = extent.next_power_of_two();
+        let extent = (1 + extent).next_power_of_two();
 
         let mut nodes = Vec::new();
         let root = alloc_node(&mut nodes);
@@ -336,7 +336,7 @@ impl Context {
     fn create_voxels() -> Vec<([i16; 3], [u8; 4])> {
         let mut voxels = Vec::new();
 
-        let radius = 64i32;
+        let radius = 16i32;
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -358,6 +358,7 @@ impl Context {
             for z in -radius..=radius {
                 let xi = (x + radius) as usize;
                 let zi = (z + radius) as usize;
+
                 if x.pow(2) + z.pow(2) <= radius.pow(2) {
                     let y =
                         -(radius.pow(2) as f32 - x.pow(2) as f32 - z.pow(2) as f32).sqrt() as i32;
@@ -400,6 +401,43 @@ impl Context {
         voxels
     }
 
+    fn voxels_from_vox(vox: &crate::vox::Vox) -> Vec<([i16; 3], [u8; 4])> {
+        let mut voxels = Vec::new();
+
+        let model = &vox.models[0];
+        for voxel in &model.voxels {
+            let [r, g, b] = vox.get_color_rgb(voxel.color);
+            let material = vox.materials.get(&(voxel.color as u32)).unwrap();
+
+            let mut mat = 0;
+            if matches!(material.kind, crate::vox::MaterialKind::Emit) {
+                mat |= 1 << 6;
+            }
+
+            voxels.push((
+                [voxel.x as i16, voxel.z as i16, voxel.y as i16],
+                [mat, r, g, b],
+            ));
+        }
+
+        voxels
+    }
+
+    fn create_octree(voxels: Vec<([i16; 3], [u8; 4])>) -> Vec<i32> {
+        let mut octree = vec![
+            // center
+            f32::to_bits(0.0) as i32,
+            f32::to_bits(0.0) as i32,
+            f32::to_bits(0.0) as i32,
+            // size
+            f32::to_bits(2.0) as i32,
+        ];
+
+        let nodes = Self::create_octree_nodes(voxels);
+        octree.extend(nodes);
+        octree
+    }
+
     fn create_bindings(gpu: &GpuContext, output_size: crate::Size) -> Bindings {
         use wgpu::BufferUsage as Usage;
 
@@ -412,16 +450,7 @@ impl Context {
         let uniform_buffer = Buffer::new(gpu, Usage::UNIFORM | Usage::COPY_DST, &[uniforms]);
         let old_uniform_buffer = Buffer::new(gpu, Usage::UNIFORM | Usage::COPY_DST, &[uniforms]);
 
-        let mut octree = vec![
-            f32::to_bits(0.0) as i32,
-            f32::to_bits(0.0) as i32,
-            f32::to_bits(0.0) as i32,
-            f32::to_bits(2.0) as i32,
-        ];
-
-        let nodes = Self::create_octree_nodes(Self::create_voxels());
-        octree.extend(nodes);
-
+        let octree = Self::create_octree(Self::create_voxels());
         let octree_buffer = Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &octree);
 
         let old_g_buffer = GBuffer::new(gpu, output_size);
@@ -643,9 +672,7 @@ impl Context {
                     *flow = ControlFlow::Exit;
                 }
                 WindowEvent::Resized(new_size) => {
-                    if let Err(e) = self.resize(new_size) {
-                        error!("failed to resize: {:?}", e);
-                    }
+                    self.resize(new_size).context("failed to resize")?;
                 }
                 WindowEvent::KeyboardInput { input, .. } => {
                     use winit::event::{ElementState::Pressed, VirtualKeyCode as Key};
@@ -672,6 +699,20 @@ impl Context {
                                 }
                             }
                             _ => {}
+                        }
+                    }
+                }
+                WindowEvent::DroppedFile(path) => {
+                    info!(path = %path.display(), "loading vox file");
+                    match crate::vox::load(&path) {
+                        Err(e) => error!("failed to load vox: {:?}", e),
+                        Ok(vox) => {
+                            let octree = Self::create_octree(Self::voxels_from_vox(&vox));
+                            use wgpu::BufferUsage as Usage;
+                            self.bindings.octree_buffer =
+                                Buffer::new(&self.gpu, Usage::STORAGE | Usage::COPY_DST, &octree);
+                            self.recreate_bind_groups();
+                            self.recreate_pipeline().context("failed to recreate pipeline")?;
                         }
                     }
                 }

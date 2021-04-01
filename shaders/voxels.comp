@@ -4,6 +4,15 @@
 #define MAX_BOUNCES 4
 #define MAX_SAMPLES 1
 
+#define SKY_COLOR vec3(0.4)
+#define SUN_DIR vec3(0.2, -0.3, 0.1)
+#define SUN_COLOR vec3(4, 4, 1)
+
+#define EMIT_STRENGTH 1
+
+#define SAMPLE_BLENDING 0.1
+#define BLENDING_DISTANCE_CUTOFF 1e-2
+
 #define ALMOST_INFINITY (1 << 30)
 
 #define LEAF_BIT (1 << 31)
@@ -246,7 +255,7 @@ vec3 node_emmitance(int node) {
     float r = float((node >> 16) & 0xff);
     float g = float((node >> 8) & 0xff);
     float b = float(node & 0xff);
-    return e * 4 * vec3(r, g, b) / 255.0;
+    return e * EMIT_STRENGTH * vec3(r, g, b) / 255.0;
 }
 
 uint random_index = (gl_GlobalInvocationID.x * gl_GlobalInvocationID.y) % RANDOM_FLOAT_COUNT;
@@ -258,9 +267,8 @@ float rand() {
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
 
-    const vec3 sky = vec3(0.0);
-
     vec3 out_color = vec3(0);
+    vec3 albedo = vec3(0);
     vec3 world_pos = vec3(ALMOST_INFINITY);
     vec3 first_normal = vec3(ALMOST_INFINITY);
     float first_time = 0;
@@ -269,8 +277,8 @@ void main() {
     for (int sampl = 0; sampl < MAX_SAMPLES; sampl++) {
         vec3 ray_origin = camera_origin.xyz;
         vec3 ray_dir = normalize(
-            (coord.x) * camera_right.xyz 
-            - (coord.y) * camera_up.xyz 
+            (coord.x + 0.5) * camera_right.xyz 
+            - (coord.y + 0.5) * camera_up.xyz 
             + camera_forward.xyz
         );
 
@@ -283,12 +291,18 @@ void main() {
             vec3 normal;
             if (cast_ray(ray_origin, ray_dir, time, node, normal)) {
                 vec3 hit_pos = ray_origin + ray_dir * time;
+                vec3 color = node_color(node);
+                vec3 emmitance = node_emmitance(node);
+
                 if (!hit) {
+                    albedo = color;
                     world_pos = hit_pos;
                     first_normal = normal;
                     hit = true;
                     first_time = time;
                 }
+
+                random_index += uint(node) + uint(time * 1238951);
 
                 float phi = 2 * PI * rand();
                 vec3 reflect_dir;
@@ -303,9 +317,6 @@ void main() {
                 const float specular = 0.15;
                 reflect_dir = normalize(mix(reflect_dir, reflection, specular));
 
-                vec3 color = node_color(node);
-                vec3 emmitance = node_emmitance(node);
-
                 sample_color += emmitance * blending_factor;
                 blending_factor *= 2 * color * dot(normal, reflect_dir);
                 // blending_factor *= color;
@@ -314,23 +325,21 @@ void main() {
                 ray_dir = reflect_dir;
             } else {
                 // hit the sky
-                sample_color += sky * blending_factor;
+                sample_color += SKY_COLOR * blending_factor;
                 break;
             }
         }
 
-        out_color += sample_color; // == vec3(0) ? blending_factor : sample_color;
+        out_color += sample_color;
     }
 
     out_color /= MAX_SAMPLES;
 
-    vec4 old_color = vec4(sky, 1);
+    vec4 old_color = vec4(SKY_COLOR, 1);
 
-    float normal_encoding = 0;
-    if (first_normal.x != 0) normal_encoding = 1 * first_normal.x;
-    if (first_normal.y != 0) normal_encoding = 2 * first_normal.y;
-    if (first_normal.z != 0) normal_encoding = 3 * first_normal.z;
+    float normal_encoding = abs(dot(first_normal, vec3(0.5, 2.5, 4.5))) + dot(first_normal, vec3(0.5));
 
+    float blending = 1;
     if (hit) {
         mat4 old_screen_to_world = mat4(
                 vec4(old_camera_right.xyz, 0),
@@ -342,7 +351,7 @@ void main() {
         vec4 old_screen = inverse(old_screen_to_world) * vec4(world_pos, 1);
         // old_screen = new_screen;
         old_screen.xyz /= old_screen.z;
-        ivec2 old_coord = ivec2(round(old_screen.x), round(-old_screen.y));
+        ivec2 old_coord = ivec2(old_screen.x, -old_screen.y);
 
         ivec2 size = imageSize(temporal_image);
 
@@ -351,16 +360,23 @@ void main() {
             vec3 old_world_pos = old_position.xyz;
             float old_normal_encoding = old_position.w;
 
-            bool same_position = distance(world_pos, old_world_pos) < 1e-2 * first_time;
+            vec3 camera_dir = normalize(camera_origin.xyz - world_pos);
+
+            float bias = max(0, dot(camera_dir, first_normal));
+            bool same_position = bias * distance(world_pos, old_world_pos) <
+                BLENDING_DISTANCE_CUTOFF * first_time;
             bool same_normal = normal_encoding == old_normal_encoding;
 
-            if (same_position) {
+            if (same_position && same_normal) {
                 old_color = imageLoad(temporal_image, old_coord);
+                blending = SAMPLE_BLENDING;
             }
         }
     }
 
-    vec3 new_color = hit ? mix(old_color.rgb, out_color, old_color.a) : sky;
-    imageStore(output_image, coord, vec4(new_color, max(0.1, old_color.a / 1.2)));
+    blending = still_sample <= 2 ? blending : 1.0 / still_sample;
+
+    vec3 new_color = hit ? mix(old_color.rgb, out_color, blending) : SKY_COLOR;
+    imageStore(output_image, coord, vec4(new_color, 1));
     imageStore(new_positions, coord, vec4(world_pos, normal_encoding));
 }
