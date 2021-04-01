@@ -3,9 +3,11 @@ mod macros;
 
 mod buffer;
 mod shader;
+mod util;
 
 use self::buffer::Buffer;
 use crate::linear::Vec3;
+use anyhow::anyhow;
 use anyhow::Context as _;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -29,6 +31,7 @@ pub(crate) struct Context {
     shader_watcher: DirectoryWatcher,
 
     pressed_keys: HashSet<winit::event::VirtualKeyCode>,
+    cursor_grabbed: bool,
 
     camera: crate::camera::Camera,
     pitch: f32,
@@ -36,7 +39,7 @@ pub(crate) struct Context {
 }
 
 struct DirectoryWatcher {
-    watcher: notify::RecommendedWatcher,
+    _watcher: notify::RecommendedWatcher,
     events: std::sync::mpsc::Receiver<notify::DebouncedEvent>,
 }
 
@@ -55,11 +58,15 @@ struct Bindings {
     octree_buffer: Buffer<i32>,
     randomness_buffer: Buffer<f32>,
 
-    voxel_output_image: wgpu::Texture,
-    voxel_temporal_image: wgpu::Texture,
+    old_g_buffer: GBuffer,
+    new_g_buffer: GBuffer,
+}
 
-    voxel_old_positions: wgpu::Texture,
-    voxel_new_positions: wgpu::Texture,
+struct GBuffer {
+    size: crate::Size,
+    color: wgpu::Texture,
+    position: wgpu::Texture,
+    normal: wgpu::Texture,
 }
 
 struct BindGroups {
@@ -203,6 +210,7 @@ impl Context {
             shader_watcher,
 
             pressed_keys: HashSet::new(),
+            cursor_grabbed: true,
 
             camera,
             pitch: 0.0,
@@ -211,8 +219,6 @@ impl Context {
     }
 
     pub const SWAP_CHAIN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
-    pub const VOXEL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
-    pub const POSITION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
     async fn create_gpu_context(window: &winit::window::Window) -> anyhow::Result<GpuContext> {
         let backends = wgpu::BackendBit::PRIMARY;
@@ -285,14 +291,14 @@ impl Context {
                     return;
                 } else {
                     let value = nodes[current + octant];
-                    let child = if value == 0 {
-                        let node = alloc_node(nodes);
-                        nodes[current + octant] = node as i32;
-                        node
-                    } else if value > 0 {
-                        value as usize
-                    } else {
-                        todo!("split leaf into multiple nodes");
+                    let child = match value {
+                        0 => {
+                            let node = alloc_node(nodes);
+                            nodes[current + octant] = node as i32;
+                            node
+                        }
+                        _ if value > 0 => value as usize,
+                        _ => todo!("split leaf into multiple nodes"),
                     };
 
                     let child_center = [
@@ -330,7 +336,7 @@ impl Context {
     fn create_voxels() -> Vec<([i16; 3], [u8; 4])> {
         let mut voxels = Vec::new();
 
-        let radius = 16i32;
+        let radius = 64i32;
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -418,14 +424,8 @@ impl Context {
 
         let octree_buffer = Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &octree);
 
-        let voxel_output_image = Self::create_storage_texture(gpu, output_size, Self::VOXEL_FORMAT);
-        let voxel_temporal_image =
-            Self::create_storage_texture(gpu, output_size, Self::VOXEL_FORMAT);
-
-        let voxel_old_positions =
-            Self::create_storage_texture(gpu, output_size, Self::POSITION_FORMAT);
-        let voxel_new_positions =
-            Self::create_storage_texture(gpu, output_size, Self::POSITION_FORMAT);
+        let old_g_buffer = GBuffer::new(gpu, output_size);
+        let new_g_buffer = GBuffer::new(gpu, output_size);
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -441,47 +441,9 @@ impl Context {
             octree_buffer,
             randomness_buffer,
 
-            voxel_output_image,
-            voxel_temporal_image,
-
-            voxel_old_positions,
-            voxel_new_positions,
+            old_g_buffer,
+            new_g_buffer,
         }
-    }
-
-    fn create_storage_texture(
-        gpu: &GpuContext,
-        size: crate::Size,
-        format: wgpu::TextureFormat,
-    ) -> wgpu::Texture {
-        use wgpu::TextureUsage as Usage;
-        Self::create_texture(
-            gpu,
-            size,
-            format,
-            Usage::COPY_SRC | Usage::COPY_DST | Usage::STORAGE,
-        )
-    }
-
-    fn create_texture(
-        gpu: &GpuContext,
-        size: crate::Size,
-        format: wgpu::TextureFormat,
-        usage: wgpu::TextureUsage,
-    ) -> wgpu::Texture {
-        gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: size.width,
-                height: size.height,
-                depth: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage,
-        })
     }
 
     fn create_bind_groups(gpu: &GpuContext, bindings: &Bindings) -> BindGroups {
@@ -492,9 +454,9 @@ impl Context {
     }
 
     fn create_render_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
-        let voxel_view = Self::view(&bindings.voxel_output_image);
+        let new_color = Self::view(&bindings.new_g_buffer.color);
         let (layout, bindings) = bind_group![
-            UniformImage(0 => (&voxel_view, ReadOnly, Self::VOXEL_FORMAT, D2) in FRAGMENT),
+            UniformImage(0 => (&new_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in FRAGMENT),
             // Uniform(0 => (bindings.uniform_buffer) in wgpu::ShaderStage::FRAGMENT),
         ];
 
@@ -506,20 +468,27 @@ impl Context {
     }
 
     fn create_voxel_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
-        let temporal_view = Self::view(&bindings.voxel_temporal_image);
-        let voxel_view = Self::view(&bindings.voxel_output_image);
-        let old_position_view = Self::view(&bindings.voxel_old_positions);
-        let new_position_view = Self::view(&bindings.voxel_new_positions);
+        let old_images = &bindings.old_g_buffer;
+        let new_images = &bindings.new_g_buffer;
+
+        let old_color = Self::view(&old_images.color);
+        let new_color = Self::view(&new_images.color);
+
+        let old_position = Self::view(&old_images.position);
+        let new_position = Self::view(&new_images.position);
+
+        let old_normal = Self::view(&old_images.normal);
+        let new_normal = Self::view(&new_images.normal);
 
         let (layout, bindings) = bind_group![
-            UniformImage(0 => (&temporal_view, ReadOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
-            UniformImage(1 => (&voxel_view, WriteOnly, Self::VOXEL_FORMAT, D2) in COMPUTE),
-            UniformImage(2 => (&old_position_view, ReadOnly, Self::POSITION_FORMAT, D2) in COMPUTE),
-            UniformImage(3 => (&new_position_view, WriteOnly, Self::POSITION_FORMAT, D2) in COMPUTE),
-            Uniform(4 => (&bindings.uniform_buffer) in COMPUTE),
-            Uniform(5 => (&bindings.old_uniform_buffer) in COMPUTE),
-            Storage(6 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
-            Storage(7 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
+            UniformImage(0 => (&old_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            UniformImage(1 => (&new_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            UniformImage(2 => (&old_position, ReadOnly, GBuffer::POSITION_FORMAT, D2) in COMPUTE),
+            UniformImage(3 => (&new_position, WriteOnly, GBuffer::POSITION_FORMAT, D2) in COMPUTE),
+            Uniform(6 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(7 => (&bindings.old_uniform_buffer) in COMPUTE),
+            Storage(8 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
+            Storage(9 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
         ];
 
         BindGroup::from_entries(gpu, &layout, &bindings)
@@ -614,6 +583,20 @@ impl Context {
         self.bindings.uniforms.still_sample = 0;
         Ok(())
     }
+
+    fn recreate_bind_groups(&mut self) {
+        self.bind_groups.voxel = Self::create_voxel_bind_group(&self.gpu, &self.bindings);
+        self.bind_groups.render = Self::create_render_bind_group(&self.gpu, &self.bindings);
+    }
+
+    fn resize(&mut self, new_size: crate::Size) -> anyhow::Result<()> {
+        self.output_size = new_size;
+        self.recreate_swap_chain();
+        self.bindings.old_g_buffer = GBuffer::new(&self.gpu, self.output_size);
+        self.bindings.new_g_buffer = GBuffer::new(&self.gpu, self.output_size);
+        self.recreate_bind_groups();
+        self.recreate_pipeline()
+    }
 }
 
 // Event handling
@@ -626,6 +609,7 @@ impl Context {
         use winit::event::{DeviceEvent, Event, WindowEvent};
         use winit::event_loop::ControlFlow;
 
+        #[allow(clippy::single_match, clippy::collapsible_match)]
         match event {
             Event::MainEventsCleared => {
                 while let Ok(event) = self.shader_watcher.events.try_recv() {
@@ -658,6 +642,11 @@ impl Context {
                 WindowEvent::CloseRequested => {
                     *flow = ControlFlow::Exit;
                 }
+                WindowEvent::Resized(new_size) => {
+                    if let Err(e) = self.resize(new_size) {
+                        error!("failed to resize: {:?}", e);
+                    }
+                }
                 WindowEvent::KeyboardInput { input, .. } => {
                     use winit::event::{ElementState::Pressed, VirtualKeyCode as Key};
 
@@ -676,6 +665,12 @@ impl Context {
                             Key::Space if input.state == Pressed => {
                                 self.bindings.uniforms.light.position = self.camera.position
                             }
+                            Key::Tab if input.state == Pressed => {
+                                self.cursor_grabbed = !self.cursor_grabbed;
+                                if self.window.set_cursor_grab(self.cursor_grabbed).is_ok() {
+                                    self.window.set_cursor_visible(!self.cursor_grabbed);
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -684,9 +679,11 @@ impl Context {
             },
             Event::DeviceEvent { event, .. } => match event {
                 DeviceEvent::MouseMotion { delta: (dx, dy) } => {
-                    self.yaw += 0.001 * dx as f32;
-                    self.pitch -= 0.001 * dy as f32;
-                    self.bindings.uniforms.still_sample = 0;
+                    if self.cursor_grabbed {
+                        self.yaw += 0.001 * dx as f32;
+                        self.pitch -= 0.001 * dy as f32;
+                        self.bindings.uniforms.still_sample = 0;
+                    }
                 }
                 _ => {}
             },
@@ -745,31 +742,6 @@ impl Context {
         }
     }
 
-    fn copy_entire_texture_to_texture(
-        encoder: &mut wgpu::CommandEncoder,
-        source: &wgpu::Texture,
-        destination: &wgpu::Texture,
-        size: crate::Size,
-    ) {
-        encoder.copy_texture_to_texture(
-            wgpu::TextureCopyView {
-                texture: source,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-            },
-            wgpu::TextureCopyView {
-                texture: destination,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-            },
-            wgpu::Extent3d {
-                width: size.width,
-                height: size.height,
-                depth: 1,
-            },
-        );
-    }
-
     pub async fn render(&mut self) -> anyhow::Result<()> {
         let output = self.get_next_frame()?;
 
@@ -794,19 +766,9 @@ impl Context {
             cpass.dispatch(groups_x, groups_y, 1);
         }
 
-        Self::copy_entire_texture_to_texture(
-            &mut encoder,
-            &self.bindings.voxel_output_image,
-            &self.bindings.voxel_temporal_image,
-            self.output_size,
-        );
-
-        Self::copy_entire_texture_to_texture(
-            &mut encoder,
-            &self.bindings.voxel_new_positions,
-            &self.bindings.voxel_old_positions,
-            self.output_size,
-        );
+        self.bindings
+            .old_g_buffer
+            .copy_from(&self.bindings.new_g_buffer, &mut encoder);
 
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -838,10 +800,7 @@ impl Context {
             match self.swap_chain.get_current_frame() {
                 Err(wgpu::SwapChainError::Outdated) => {
                     let _ = info_span!("swap chain outdated");
-                    info!("recreating surface");
-                    self.gpu.surface = Self::create_surface(&self.gpu.instance, &self.window);
-                    info!("recreating swap chain");
-                    self.swap_chain = Self::create_swap_chain(&self.gpu, self.output_size);
+                    self.recreate_swap_chain();
                 }
                 Ok(wgpu::SwapChainFrame {
                     suboptimal: true, ..
@@ -852,15 +811,18 @@ impl Context {
                     self.swap_chain = Self::create_swap_chain(&self.gpu, self.output_size);
                 }
                 Ok(frame) => return Ok(frame.output),
-                Err(e) => {
-                    return Err(e)
-                        .context("could not get next frame in swap chain")
-                        .into()
-                }
+                Err(e) => return Err(e).context("could not get next frame in swap chain"),
             }
         }
 
-        panic!("failed to fetch next frame in swap chain");
+        Err(anyhow!("failed to fetch next frame in swap chain"))
+    }
+
+    fn recreate_swap_chain(&mut self) {
+        info!("recreating surface");
+        self.gpu.surface = Self::create_surface(&self.gpu.instance, &self.window);
+        info!("recreating swap chain");
+        self.swap_chain = Self::create_swap_chain(&self.gpu, self.output_size);
     }
 
     fn update_bindings(&mut self) {
@@ -938,8 +900,47 @@ impl DirectoryWatcher {
             .with_context(|| format!("failed to watch over directory `{}`", path.display()))?;
 
         Ok(DirectoryWatcher {
-            watcher,
+            _watcher: watcher,
             events: rx,
         })
+    }
+}
+
+impl GBuffer {
+    pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+    pub const POSITION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+    pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+
+    fn new(gpu: &GpuContext, size: crate::Size) -> GBuffer {
+        let color = Self::create_storage_texture(gpu, size, GBuffer::COLOR_FORMAT);
+        let position = Self::create_storage_texture(gpu, size, GBuffer::POSITION_FORMAT);
+        let normal = Self::create_storage_texture(gpu, size, GBuffer::NORMAL_FORMAT);
+
+        GBuffer {
+            size,
+            color,
+            position,
+            normal,
+        }
+    }
+
+    fn create_storage_texture(
+        gpu: &GpuContext,
+        size: crate::Size,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::Texture {
+        use wgpu::TextureUsage as Usage;
+        util::create_texture(
+            size,
+            format,
+            Usage::COPY_SRC | Usage::COPY_DST | Usage::STORAGE,
+            gpu,
+        )
+    }
+
+    fn copy_from(&self, other: &GBuffer, encoder: &mut wgpu::CommandEncoder) {
+        util::copy_entire_texture_to_texture(&other.color, &self.color, self.size, encoder);
+        util::copy_entire_texture_to_texture(&other.position, &self.position, self.size, encoder);
+        util::copy_entire_texture_to_texture(&other.normal, &self.normal, self.size, encoder);
     }
 }

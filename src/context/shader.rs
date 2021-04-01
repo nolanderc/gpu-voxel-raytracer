@@ -47,6 +47,7 @@ fn should_rebuild(source_path: &Path, binary_path: &Path) -> bool {
     let last_modification =
         |path: &Path| path.metadata().ok().and_then(|meta| meta.modified().ok());
 
+    #[allow(clippy::match_like_matches_macro)]
     match (
         last_modification(source_path),
         last_modification(binary_path),

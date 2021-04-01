@@ -45,8 +45,8 @@ fn main() -> anyhow::Result<()> {
     let event_loop = winit::event_loop::EventLoop::new();
     let window = winit::window::WindowBuilder::new()
         .with_title("voxels")
-        .with_resizable(false)
-        .with_inner_size(Size::new(1280, 720))
+        .with_resizable(true)
+        .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
         .build(&event_loop)
         .expect("could not open window");
     let window = Arc::new(window);
