@@ -1,0 +1,42 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba32f, binding = 0) uniform writeonly image2D output_colors;
+layout(rgba32f, binding = 1) uniform readonly image2D colors;
+
+#define RADIUS 2
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+
+    ivec2 size = imageSize(output_colors);
+
+    float normalization = 0;
+    vec3 sum = vec3(0);
+
+    float sigma_distance = 2 * pow(1.0, 2);
+    float sigma_range = 2 * pow(1, 2);
+
+    vec3 center = imageLoad(colors, coord).xyz;
+
+    for (int dy = -RADIUS; dy <= RADIUS; dy++) {
+        for (int dx = -RADIUS; dx <= RADIUS; dx++) {
+            int nx = coord.x + dx;
+            int ny = coord.y + dy;
+
+            if (0 <= nx && nx < size.x && 0 <= ny && ny < size.y) {
+                vec3 window = imageLoad(colors, ivec2(nx, ny)).xyz;
+
+                vec3 color_delta = center - window;
+                float factor_range = dot(color_delta, color_delta) / sigma_range;
+                float factor_distance = (dx*dx + dy*dy) / sigma_distance;
+                float factor = exp(-factor_range - factor_distance);
+
+                normalization += factor;
+                sum += window * factor;
+            }
+        }
+    }
+
+    imageStore(output_colors, coord, vec4(RADIUS == 0 ? center : sum / normalization, 1));
+}

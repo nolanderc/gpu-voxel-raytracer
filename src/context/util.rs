@@ -45,3 +45,7 @@ pub(crate) fn create_texture(
         usage,
     })
 }
+
+pub fn view(texture: &wgpu::Texture) -> wgpu::TextureView {
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}

@@ -21,6 +21,7 @@ pub(crate) struct Context {
 
     pipeline: wgpu::RenderPipeline,
     voxel_pipeline: wgpu::ComputePipeline,
+    denoise_pipeline: wgpu::ComputePipeline,
 
     bindings: Bindings,
     bind_groups: BindGroups,
@@ -60,6 +61,8 @@ struct Bindings {
 
     old_g_buffer: GBuffer,
     new_g_buffer: GBuffer,
+
+    denoised_color: wgpu::Texture,
 }
 
 struct GBuffer {
@@ -72,6 +75,7 @@ struct GBuffer {
 struct BindGroups {
     render: BindGroup,
     voxel: BindGroup,
+    denoise: BindGroup,
 }
 
 struct BindGroup {
@@ -180,8 +184,9 @@ impl Context {
 
         let bind_groups = Self::create_bind_groups(&gpu, &bindings);
 
-        let pipeline = Self::create_render_pipeline(&gpu, &bind_groups.render)?;
-        let voxel_pipeline = Self::create_voxel_pipeline(&gpu, &bind_groups.voxel)?;
+        let pipeline = Self::create_render_pipeline(&bind_groups.render, &gpu)?;
+        let voxel_pipeline = Self::create_voxel_pipeline(&bind_groups.voxel, &gpu)?;
+        let denoise_pipeline = Self::create_denoise_pipeline(&bind_groups.denoise, &gpu)?;
 
         let camera = crate::camera::Camera {
             position: Vec3::new(0.0, 0.0, -2.0),
@@ -203,6 +208,7 @@ impl Context {
 
             pipeline,
             voxel_pipeline,
+            denoise_pipeline,
 
             start: std::time::Instant::now(),
             stopwatch: Stopwatch::new(),
@@ -456,6 +462,9 @@ impl Context {
         let old_g_buffer = GBuffer::new(gpu, output_size);
         let new_g_buffer = GBuffer::new(gpu, output_size);
 
+        let denoised_color =
+            GBuffer::create_storage_texture(output_size, GBuffer::COLOR_FORMAT, gpu);
+
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let randomness = (0..(1 << 16))
@@ -472,6 +481,8 @@ impl Context {
 
             old_g_buffer,
             new_g_buffer,
+
+            denoised_color,
         }
     }
 
@@ -479,35 +490,29 @@ impl Context {
         BindGroups {
             render: Self::create_render_bind_group(gpu, bindings),
             voxel: Self::create_voxel_bind_group(gpu, bindings),
+            denoise: Self::create_denoise_bind_group(gpu, bindings),
         }
     }
 
     fn create_render_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
-        let new_color = Self::view(&bindings.new_g_buffer.color);
+        let color = util::view(&bindings.denoised_color);
         let (layout, bindings) = bind_group![
-            UniformImage(0 => (&new_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in FRAGMENT),
+            UniformImage(0 => (&color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in FRAGMENT),
             // Uniform(0 => (bindings.uniform_buffer) in wgpu::ShaderStage::FRAGMENT),
         ];
 
-        BindGroup::from_entries(gpu, &layout, &bindings)
-    }
-
-    fn view(texture: &wgpu::Texture) -> wgpu::TextureView {
-        texture.create_view(&wgpu::TextureViewDescriptor::default())
+        BindGroup::from_entries(&layout, &bindings, gpu)
     }
 
     fn create_voxel_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
         let old_images = &bindings.old_g_buffer;
         let new_images = &bindings.new_g_buffer;
 
-        let old_color = Self::view(&old_images.color);
-        let new_color = Self::view(&new_images.color);
+        let old_color = util::view(&old_images.color);
+        let new_color = util::view(&new_images.color);
 
-        let old_position = Self::view(&old_images.position);
-        let new_position = Self::view(&new_images.position);
-
-        let old_normal = Self::view(&old_images.normal);
-        let new_normal = Self::view(&new_images.normal);
+        let old_position = util::view(&old_images.position);
+        let new_position = util::view(&new_images.position);
 
         let (layout, bindings) = bind_group![
             UniformImage(0 => (&old_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
@@ -520,14 +525,27 @@ impl Context {
             Storage(9 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
         ];
 
-        BindGroup::from_entries(gpu, &layout, &bindings)
+        BindGroup::from_entries(&layout, &bindings, gpu)
     }
 
-    fn create_voxel_pipeline(
-        gpu: &GpuContext,
+    fn create_denoise_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
+        let new_color = util::view(&bindings.new_g_buffer.color);
+        let denoise_color = util::view(&bindings.denoised_color);
+
+        let (layout, bindings) = bind_group![
+            UniformImage(0 => (&denoise_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            UniformImage(1 => (&new_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+        ];
+
+        BindGroup::from_entries(&layout, &bindings, gpu)
+    }
+
+    fn create_compute_pipeline(
         bind_group: &BindGroup,
+        shader: impl AsRef<std::path::Path>,
+        gpu: &GpuContext,
     ) -> anyhow::Result<wgpu::ComputePipeline> {
-        let voxel_module = shader::create_shader_module(gpu, "shaders/voxels.comp")?;
+        let module = shader::create_shader_module(gpu, shader.as_ref())?;
 
         let layout = gpu
             .device
@@ -542,16 +560,30 @@ impl Context {
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: None,
                 layout: Some(&layout),
-                module: &voxel_module,
+                module: &module,
                 entry_point: "main",
             });
 
         Ok(pipeline)
     }
 
-    fn create_render_pipeline(
-        gpu: &GpuContext,
+    fn create_voxel_pipeline(
         bind_group: &BindGroup,
+        gpu: &GpuContext,
+    ) -> anyhow::Result<wgpu::ComputePipeline> {
+        Self::create_compute_pipeline(bind_group, "shaders/voxels.comp", gpu)
+    }
+
+    fn create_denoise_pipeline(
+        bind_group: &BindGroup,
+        gpu: &GpuContext,
+    ) -> anyhow::Result<wgpu::ComputePipeline> {
+        Self::create_compute_pipeline(bind_group, "shaders/denoise.comp", gpu)
+    }
+
+    fn create_render_pipeline(
+        bind_group: &BindGroup,
+        gpu: &GpuContext,
     ) -> anyhow::Result<wgpu::RenderPipeline> {
         let layout = gpu
             .device
@@ -604,18 +636,17 @@ impl Context {
 
     fn recreate_pipeline(&mut self) -> anyhow::Result<()> {
         info!("recreating render pipeline");
-        self.pipeline = Self::create_render_pipeline(&self.gpu, &self.bind_groups.render)?;
+        self.pipeline = Self::create_render_pipeline(&self.bind_groups.render, &self.gpu)?;
 
         info!("recreating voxel pipeline");
-        self.voxel_pipeline = Self::create_voxel_pipeline(&self.gpu, &self.bind_groups.voxel)?;
+        self.voxel_pipeline = Self::create_voxel_pipeline(&self.bind_groups.voxel, &self.gpu)?;
+
+        info!("recreating denoise pipeline");
+        self.denoise_pipeline =
+            Self::create_denoise_pipeline(&self.bind_groups.denoise, &self.gpu)?;
 
         self.bindings.uniforms.still_sample = 0;
         Ok(())
-    }
-
-    fn recreate_bind_groups(&mut self) {
-        self.bind_groups.voxel = Self::create_voxel_bind_group(&self.gpu, &self.bindings);
-        self.bind_groups.render = Self::create_render_bind_group(&self.gpu, &self.bindings);
     }
 
     fn resize(&mut self, new_size: crate::Size) -> anyhow::Result<()> {
@@ -623,7 +654,9 @@ impl Context {
         self.recreate_swap_chain();
         self.bindings.old_g_buffer = GBuffer::new(&self.gpu, self.output_size);
         self.bindings.new_g_buffer = GBuffer::new(&self.gpu, self.output_size);
-        self.recreate_bind_groups();
+        self.bindings.denoised_color =
+            GBuffer::create_storage_texture(new_size, GBuffer::COLOR_FORMAT, &self.gpu);
+        self.bind_groups = Self::create_bind_groups(&self.gpu, &self.bindings);
         self.recreate_pipeline()
     }
 }
@@ -711,8 +744,9 @@ impl Context {
                             use wgpu::BufferUsage as Usage;
                             self.bindings.octree_buffer =
                                 Buffer::new(&self.gpu, Usage::STORAGE | Usage::COPY_DST, &octree);
-                            self.recreate_bind_groups();
-                            self.recreate_pipeline().context("failed to recreate pipeline")?;
+                            self.bind_groups = Self::create_bind_groups(&self.gpu, &self.bindings);
+                            self.recreate_pipeline()
+                                .context("failed to recreate pipeline")?;
                         }
                     }
                 }
@@ -804,6 +838,10 @@ impl Context {
 
             cpass.set_pipeline(&self.voxel_pipeline);
             cpass.set_bind_group(0, &self.bind_groups.voxel.bindings, &[]);
+            cpass.dispatch(groups_x, groups_y, 1);
+
+            cpass.set_pipeline(&self.denoise_pipeline);
+            cpass.set_bind_group(0, &self.bind_groups.denoise.bindings, &[]);
             cpass.dispatch(groups_x, groups_y, 1);
         }
 
@@ -906,9 +944,9 @@ fn color(r: f64, g: f64, b: f64, a: f64) -> wgpu::Color {
 
 impl BindGroup {
     pub fn from_entries(
-        gpu: &GpuContext,
         layout: &[wgpu::BindGroupLayoutEntry],
         bindings: &[wgpu::BindGroupEntry],
+        gpu: &GpuContext,
     ) -> BindGroup {
         let layout = gpu
             .device
@@ -953,9 +991,9 @@ impl GBuffer {
     pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
     fn new(gpu: &GpuContext, size: crate::Size) -> GBuffer {
-        let color = Self::create_storage_texture(gpu, size, GBuffer::COLOR_FORMAT);
-        let position = Self::create_storage_texture(gpu, size, GBuffer::POSITION_FORMAT);
-        let normal = Self::create_storage_texture(gpu, size, GBuffer::NORMAL_FORMAT);
+        let color = Self::create_storage_texture(size, GBuffer::COLOR_FORMAT, gpu);
+        let position = Self::create_storage_texture(size, GBuffer::POSITION_FORMAT, gpu);
+        let normal = Self::create_storage_texture(size, GBuffer::NORMAL_FORMAT, gpu);
 
         GBuffer {
             size,
@@ -966,9 +1004,9 @@ impl GBuffer {
     }
 
     fn create_storage_texture(
-        gpu: &GpuContext,
         size: crate::Size,
         format: wgpu::TextureFormat,
+        gpu: &GpuContext,
     ) -> wgpu::Texture {
         use wgpu::TextureUsage as Usage;
         util::create_texture(

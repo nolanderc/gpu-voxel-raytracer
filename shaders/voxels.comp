@@ -2,15 +2,15 @@
 
 #define MAX_DEPTH 15
 #define MAX_BOUNCES 4
-#define MAX_SAMPLES 1
+#define MAX_SAMPLES 4
 
-#define SKY_COLOR vec3(0.4)
+#define SKY_COLOR vec3(0.0)
 #define SUN_DIR vec3(0.2, -0.3, 0.1)
 #define SUN_COLOR vec3(4, 4, 1)
 
-#define EMIT_STRENGTH 1
+#define EMIT_STRENGTH 4
 
-#define SAMPLE_BLENDING 0.1
+#define SAMPLE_BLENDING 0.2
 #define BLENDING_DISTANCE_CUTOFF 1e-2
 
 #define ALMOST_INFINITY (1 << 30)
