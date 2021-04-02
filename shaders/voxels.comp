@@ -273,6 +273,7 @@ void main() {
     vec3 first_normal = vec3(ALMOST_INFINITY);
     float first_time = 0;
     bool hit = false;
+    int first_node = 0;
 
     for (int sampl = 0; sampl < MAX_SAMPLES; sampl++) {
         vec3 ray_origin = camera_origin.xyz;
@@ -295,6 +296,7 @@ void main() {
                 vec3 emmitance = node_emmitance(node);
 
                 if (!hit) {
+                    first_node = node;
                     albedo = color;
                     world_pos = hit_pos;
                     first_normal = normal;
@@ -374,7 +376,7 @@ void main() {
         }
     }
 
-    blending = still_sample <= 2 ? blending : 1.0 / still_sample;
+    blending = still_sample <= 2 ? blending : max(0.01, 1.0 / still_sample);
 
     vec3 new_color = hit ? mix(old_color.rgb, out_color, blending) : SKY_COLOR;
     imageStore(output_image, coord, vec4(new_color, 1));
