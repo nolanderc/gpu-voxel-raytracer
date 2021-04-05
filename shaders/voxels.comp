@@ -2,15 +2,18 @@
 
 #define MAX_DEPTH 15
 #define MAX_BOUNCES 4
-#define MAX_SAMPLES 4
+#define MAX_SAMPLES 1
 
-#define SKY_COLOR vec3(0.0)
+#define SKY_COLOR vec3(0.01)
 #define SUN_DIR vec3(0.2, -0.3, 0.1)
-#define SUN_COLOR vec3(4, 4, 1)
+#define SUN_COLOR vec3(1, 1, 1)
+#define SUN_SIZE .01
 
+#define SPECULARITY 0.15
 #define EMIT_STRENGTH 4
 
-#define SAMPLE_BLENDING 0.2
+#define SAMPLE_BLENDING 0.3
+#define MAXIMUM_BLENDING (0.01)
 #define BLENDING_DISTANCE_CUTOFF 1e-2
 
 #define ALMOST_INFINITY (1 << 30)
@@ -316,18 +319,47 @@ void main() {
                 reflect_dir -= normal * min(0, 2 * dot(normal, reflect_dir));
 
                 vec3 reflection = reflect(ray_dir, normal);
-                const float specular = 0.15;
-                reflect_dir = normalize(mix(reflect_dir, reflection, specular));
+                reflect_dir = normalize(mix(reflect_dir, reflection, SPECULARITY));
 
                 sample_color += emmitance * blending_factor;
-                blending_factor *= 2 * color * dot(normal, reflect_dir);
-                // blending_factor *= color;
+                blending_factor *= mix(2, 1, SPECULARITY) * color * dot(normal, reflect_dir);
+                //blending_factor *= color;
 
-                ray_origin = hit_pos + 1e-4 * normal;
+                ray_origin = hit_pos + 1e-5 * normal;
                 ray_dir = reflect_dir;
+
+                // CAST SUN RAY
+                vec3 rand_dir = vec3(rand(), rand(), rand());
+                vec3 up_dir = normalize(cross(rand_dir, SUN_DIR));
+                vec3 right_dir = normalize(cross(SUN_DIR, up_dir));
+
+                float dx = 2 * rand() - 1;
+                float dy = 2 * rand() - 1;
+
+                vec3 light_dir = normalize(SUN_DIR) + (dx * right_dir + dy * up_dir) * SUN_SIZE;
+
+                float sun_time;
+                int sun_node;
+                vec3 sun_normal;
+                bool sun_obstructed = cast_ray(
+                    ray_origin, normalize(-light_dir),
+                    sun_time, sun_node, sun_normal
+                );
+
+                if (!sun_obstructed) {
+                    sample_color += SUN_COLOR * blending_factor;
+                }
             } else {
+                if (bounce == 0) {
+                    blending_factor = vec3(1);
+                }
+
                 // hit the sky
-                sample_color += SKY_COLOR * blending_factor;
+                float sun_power = pow(
+                    max(0, dot(ray_dir, normalize(-SUN_DIR))), 
+                    1.0 / pow(SUN_SIZE, 2)
+                );
+                sample_color += (SKY_COLOR + SUN_COLOR * sun_power) * blending_factor;
                 break;
             }
         }
@@ -337,7 +369,7 @@ void main() {
 
     out_color /= MAX_SAMPLES;
 
-    vec4 old_color = vec4(SKY_COLOR, 1);
+    vec4 old_color = vec4(out_color, 1);
 
     float normal_encoding = abs(dot(first_normal, vec3(0.5, 2.5, 4.5))) + dot(first_normal, vec3(0.5));
 
@@ -376,9 +408,9 @@ void main() {
         }
     }
 
-    blending = still_sample <= 2 ? blending : max(0.01, 1.0 / still_sample);
+    blending = still_sample <= 2 ? blending : min(blending, max(MAXIMUM_BLENDING, 1.0 / still_sample));
 
-    vec3 new_color = hit ? mix(old_color.rgb, out_color, blending) : SKY_COLOR;
-    imageStore(output_image, coord, vec4(new_color, 1));
+    vec3 new_color = hit ? mix(old_color.rgb, out_color, blending) : out_color;
+    imageStore(output_image, coord, vec4(new_color, 10 * first_node + 100 * normal_encoding));
     imageStore(new_positions, coord, vec4(world_pos, normal_encoding));
 }
