@@ -5,9 +5,9 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(rgba32f, binding = 0) uniform writeonly image2D output_colors;
 layout(rgba32f, binding = 1) uniform readonly image2D colors;
 
-#define SIGMA_DISTANCE 1
-#define SIGMA_RANGE 1
-#define RADIUS 1
+#define SIGMA_DISTANCE 2
+#define SIGMA_RANGE 2
+#define RADIUS 0
 
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
@@ -30,7 +30,7 @@ void main() {
             if (0 <= nx && nx < size.x && 0 <= ny && ny < size.y) {
                 vec4 window = imageLoad(colors, ivec2(nx, ny));
 
-                vec4 color_delta = center - window;
+                vec3 color_delta = center.rgb - window.rgb;
                 float factor_range = dot(color_delta, color_delta) / sigma_range;
                 float factor_distance = (dx*dx + dy*dy) / sigma_distance;
                 float factor = exp(-factor_range - factor_distance);

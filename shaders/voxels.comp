@@ -1,19 +1,19 @@
 #version 450
 
 #define MAX_DEPTH 15
-#define MAX_BOUNCES 4
+#define MAX_BOUNCES 3
 #define MAX_SAMPLES 1
 
-#define SKY_COLOR vec3(0.01)
-#define SUN_DIR vec3(0.2, -0.3, 0.1)
-#define SUN_COLOR vec3(1, 1, 1)
-#define SUN_SIZE .01
+#define SKY_COLOR vec3(0.3, 0.7, 0.8)
+#define SUN_DIR vec3(0.2 * cos(0.1 * global_time), -0.2, 0.1 * sin(0.1 * global_time))
+#define SUN_COLOR (0.5 * vec3(5, 5, 3))
+#define SUN_SIZE .05
 
-#define SPECULARITY 0.15
+#define SPECULARITY 0.1
 #define EMIT_STRENGTH 4
 
-#define SAMPLE_BLENDING 0.3
-#define MAXIMUM_BLENDING (0.01)
+#define SAMPLE_BLENDING 0.1
+#define MAXIMUM_BLENDING SAMPLE_BLENDING
 #define BLENDING_DISTANCE_CUTOFF 1e-2
 
 #define ALMOST_INFINITY (1 << 30)
@@ -25,10 +25,12 @@
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(rgba32f, binding = 0) uniform readonly image2D temporal_image;
+layout(binding = 0) uniform texture2D temporal_image;
+layout(binding = 10) uniform sampler temporal_sampler;
+
 layout(rgba32f, binding = 1) uniform writeonly image2D output_image;
 
-layout(rgba32f, binding = 2) uniform readonly image2D old_positions;
+layout(binding = 2) uniform texture2D old_positions;
 layout(rgba32f, binding = 3) uniform writeonly image2D new_positions;
 
 layout(binding = 6) uniform uniforms {
@@ -39,6 +41,7 @@ layout(binding = 6) uniform uniforms {
     vec4 light;
     float global_time;
     uint still_sample;
+    uint frame_number;
 };
 
 layout(binding = 7) uniform old_uniforms {
@@ -51,13 +54,16 @@ layout(binding = 7) uniform old_uniforms {
 layout(binding = 8) readonly buffer octree_data {
     vec3 root_center;
     float root_size;
+    float child_size;
     int nodes[];
 };
 
-#define RANDOM_FLOAT_COUNT (1 << 16)
+#define BLUE_NOISE_SIZE 128
+#define BLUE_NOISE_COUNT 512
+#define BLUE_NOISE_BUFFER_SIZE (BLUE_NOISE_SIZE * BLUE_NOISE_SIZE * BLUE_NOISE_COUNT)
 
 layout(binding = 9) readonly buffer randomness {
-    float random_floats[RANDOM_FLOAT_COUNT];
+    float blue_noise[BLUE_NOISE_BUFFER_SIZE];
 };
 
 bool ray_cube_intersection(
@@ -261,10 +267,24 @@ vec3 node_emmitance(int node) {
     return e * EMIT_STRENGTH * vec3(r, g, b) / 255.0;
 }
 
-uint random_index = (gl_GlobalInvocationID.x * gl_GlobalInvocationID.y) % RANDOM_FLOAT_COUNT;
+uint random_index = gl_GlobalInvocationID.x % BLUE_NOISE_SIZE 
+    + (gl_GlobalInvocationID.y % BLUE_NOISE_SIZE) * BLUE_NOISE_SIZE
+    + (frame_number % BLUE_NOISE_COUNT) * BLUE_NOISE_SIZE * BLUE_NOISE_SIZE;
 float rand() {
-    random_index = (random_index + 1) % RANDOM_FLOAT_COUNT;
-    return random_floats[random_index];
+    random_index = (random_index + BLUE_NOISE_SIZE * BLUE_NOISE_SIZE) % BLUE_NOISE_BUFFER_SIZE;
+    return blue_noise[random_index];
+}
+
+vec3 random_hemisphere(vec3 normal) {
+    float phi = 2 * PI * rand();
+    vec3 reflect_dir;
+    reflect_dir.x = 2 * rand() - 1;
+    float plane_radius = sqrt(1 - reflect_dir.x*reflect_dir.x);
+    reflect_dir.y = plane_radius * cos(phi);
+    reflect_dir.z = plane_radius * sin(phi);
+
+    reflect_dir -= normal * min(0, 2 * dot(normal, reflect_dir));
+    return reflect_dir;
 }
 
 void main() {
@@ -288,6 +308,7 @@ void main() {
 
         vec3 sample_color = vec3(0);
         vec3 blending_factor = vec3(1);
+        uint rays = 1;
 
         for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
             float time;
@@ -307,28 +328,7 @@ void main() {
                     first_time = time;
                 }
 
-                random_index += uint(node) + uint(time * 1238951);
-
-                float phi = 2 * PI * rand();
-                vec3 reflect_dir;
-                reflect_dir.x = 2 * rand() - 1;
-                float plane_radius = sqrt(1 - reflect_dir.x*reflect_dir.x);
-                reflect_dir.y = plane_radius * cos(phi);
-                reflect_dir.z = plane_radius * sin(phi);
-
-                reflect_dir -= normal * min(0, 2 * dot(normal, reflect_dir));
-
-                vec3 reflection = reflect(ray_dir, normal);
-                reflect_dir = normalize(mix(reflect_dir, reflection, SPECULARITY));
-
-                sample_color += emmitance * blending_factor;
-                blending_factor *= mix(2, 1, SPECULARITY) * color * dot(normal, reflect_dir);
-                //blending_factor *= color;
-
-                ray_origin = hit_pos + 1e-5 * normal;
-                ray_dir = reflect_dir;
-
-                // CAST SUN RAY
+                // === Cast sun ray ===
                 vec3 rand_dir = vec3(rand(), rand(), rand());
                 vec3 up_dir = normalize(cross(rand_dir, SUN_DIR));
                 vec3 right_dir = normalize(cross(SUN_DIR, up_dir));
@@ -342,13 +342,27 @@ void main() {
                 int sun_node;
                 vec3 sun_normal;
                 bool sun_obstructed = cast_ray(
-                    ray_origin, normalize(-light_dir),
+                    hit_pos + 1e-5 * normal, normalize(-light_dir),
                     sun_time, sun_node, sun_normal
                 );
 
                 if (!sun_obstructed) {
-                    sample_color += SUN_COLOR * blending_factor;
+                    //rays++;
+                    sample_color += SUN_COLOR * color * blending_factor * mix(1, 0, SPECULARITY) * max(0, dot(normal, normalize(-light_dir)));
                 }
+
+
+                // === Sample BRDF ===
+                vec3 reflection = reflect(ray_dir, normal);
+                vec3 reflect_dir = normalize(mix(random_hemisphere(normal), reflection, SPECULARITY));
+
+                sample_color += emmitance * blending_factor;
+                blending_factor *= color * mix(2, 1, SPECULARITY) * dot(normal, reflect_dir);
+                //blending_factor *= color;
+
+                ray_origin = hit_pos + 1e-5 * normal;
+                ray_dir = reflect_dir;
+
             } else {
                 if (bounce == 0) {
                     blending_factor = vec3(1);
@@ -364,7 +378,7 @@ void main() {
             }
         }
 
-        out_color += sample_color;
+        out_color += sample_color / rays;
     }
 
     out_color /= MAX_SAMPLES;
@@ -387,30 +401,37 @@ void main() {
         old_screen.xyz /= old_screen.z;
         ivec2 old_coord = ivec2(old_screen.x, -old_screen.y);
 
-        ivec2 size = imageSize(temporal_image);
+        ivec2 size = textureSize(sampler2D(temporal_image, temporal_sampler), 0);
 
         if (0 <= old_coord.x && old_coord.x < size.x && 0 <= old_coord.y && old_coord.y < size.y) {
-            vec4 old_position = imageLoad(old_positions, old_coord);
+            vec2 tex_coord = old_screen.xy * vec2(1.0 / size.x, -1.0 / size.y);
+
+            vec4 old_position = texture(sampler2D(old_positions, temporal_sampler), tex_coord);
             vec3 old_world_pos = old_position.xyz;
             float old_normal_encoding = old_position.w;
 
             vec3 camera_dir = normalize(camera_origin.xyz - world_pos);
 
-            float bias = max(0, dot(camera_dir, first_normal));
-            bool same_position = bias * distance(world_pos, old_world_pos) <
-                BLENDING_DISTANCE_CUTOFF * first_time;
-            bool same_normal = normal_encoding == old_normal_encoding;
+            float bias = max(0.1, dot(camera_dir, first_normal));
+            float dist = distance(world_pos, old_world_pos);
 
-            if (same_position && same_normal) {
-                old_color = imageLoad(temporal_image, old_coord);
-                blending = SAMPLE_BLENDING;
+            bool same_position = bias * dist < 1e-2 * child_size;
+            bool same_normal = normal_encoding == old_normal_encoding 
+                || bias * dist < 1e-1 * child_size * first_time;
+
+            if (same_normal && same_position) {
+                old_color = texture(sampler2D(temporal_image, temporal_sampler), tex_coord); 
+                blending = old_color.a;
             }
         }
     }
 
-    blending = still_sample <= 2 ? blending : min(blending, max(MAXIMUM_BLENDING, 1.0 / still_sample));
+    float next_blending = max(0.9 * blending, MAXIMUM_BLENDING);
+    if (still_sample <= 2) {
+        next_blending = min(next_blending, 1.0 / still_sample);
+    }
 
     vec3 new_color = hit ? mix(old_color.rgb, out_color, blending) : out_color;
-    imageStore(output_image, coord, vec4(new_color, 10 * first_node + 100 * normal_encoding));
+    imageStore(output_image, coord, vec4(new_color, next_blending));
     imageStore(new_positions, coord, vec4(world_pos, normal_encoding));
 }

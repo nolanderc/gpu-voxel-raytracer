@@ -109,6 +109,7 @@ struct Uniforms {
     light: PointLight,
     time: f32,
     still_sample: u32,
+    frame_number: u32,
 }
 
 #[repr(C)]
@@ -180,7 +181,7 @@ impl Context {
 
         let output_size = window.inner_size();
         let swap_chain = Self::create_swap_chain(&gpu, output_size);
-        let bindings = Self::create_bindings(&gpu, output_size);
+        let bindings = Self::create_bindings(&gpu, output_size)?;
 
         let bind_groups = Self::create_bind_groups(&gpu, &bindings);
 
@@ -320,14 +321,8 @@ impl Context {
             }
         }
 
-        let mut extent = 0u16;
-        for ([x, y, z], _) in voxels.iter() {
-            extent = extent
-                .max(x.abs() as u16)
-                .max(y.abs() as u16)
-                .max(z.abs() as u16);
-        }
-        let extent = (1 + extent).next_power_of_two();
+        let depth = Self::voxel_depth(voxels.iter().map(|(pos, _)| *pos));
+        let extent = 1 << depth;
 
         let mut nodes = Vec::new();
         let root = alloc_node(&mut nodes);
@@ -339,10 +334,33 @@ impl Context {
         nodes
     }
 
+    fn voxel_depth(mut voxels: impl Iterator<Item = [i16; 3]>) -> u16 {
+        let mut min;
+        let mut max;
+
+        match voxels.next() {
+            None => return 0,
+            Some([x, y, z]) => {
+                min = x.min(y).min(z);
+                max = x.max(y).max(z);
+            }
+        }
+
+        for [x, y, z] in voxels {
+            min = min.min(x).min(y).min(z);
+            max = max.max(x).max(y).max(z);
+        }
+
+        let min_depth = (min.abs() as u16).next_power_of_two().trailing_zeros();
+        let max_depth = (max.abs() as u16 + 1).next_power_of_two().trailing_zeros();
+
+        u32::max(min_depth, max_depth) as u16
+    }
+
     fn create_voxels() -> Vec<([i16; 3], [u8; 4])> {
         let mut voxels = Vec::new();
 
-        let radius = 16i32;
+        let radius = 64i32;
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -430,13 +448,19 @@ impl Context {
     }
 
     fn create_octree(voxels: Vec<([i16; 3], [u8; 4])>) -> Vec<i32> {
+        let depth = Self::voxel_depth(voxels.iter().map(|(pos, _)| *pos));
+        let root_size = 2.0;
+        let child_size = root_size / depth as f32 / 2.0;
+
         let mut octree = vec![
             // center
             f32::to_bits(0.0) as i32,
             f32::to_bits(0.0) as i32,
             f32::to_bits(0.0) as i32,
-            // size
-            f32::to_bits(2.0) as i32,
+            // root_size
+            f32::to_bits(root_size) as i32,
+            // child_size
+            f32::to_bits(child_size) as i32,
         ];
 
         let nodes = Self::create_octree_nodes(voxels);
@@ -444,7 +468,7 @@ impl Context {
         octree
     }
 
-    fn create_bindings(gpu: &GpuContext, output_size: crate::Size) -> Bindings {
+    fn create_bindings(gpu: &GpuContext, output_size: crate::Size) -> anyhow::Result<Bindings> {
         use wgpu::BufferUsage as Usage;
 
         let mut uniforms = <Uniforms as bytemuck::Zeroable>::zeroed();
@@ -465,14 +489,19 @@ impl Context {
         let denoised_color =
             GBuffer::create_storage_texture(output_size, GBuffer::COLOR_FORMAT, gpu);
 
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let randomness = (0..(1 << 16))
-            .map(|_| rng.gen_range(0.0..1.0))
-            .collect::<Vec<_>>();
-        let randomness_buffer = Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &randomness);
+        let (blue_noise_size, blue_noise_pixels) =
+            Self::load_blue_noise("resources/blue-noise-128.zip")
+                .context("failed to load blue noise")?;
 
-        Bindings {
+        assert_eq!(
+            blue_noise_size, 128,
+            "blue noise images must have width and height set to 128"
+        );
+
+        let randomness_buffer =
+            Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &blue_noise_pixels);
+
+        let bindings = Bindings {
             old_uniform_buffer,
             uniform_buffer,
             uniforms,
@@ -483,7 +512,86 @@ impl Context {
             new_g_buffer,
 
             denoised_color,
+        };
+
+        Ok(bindings)
+    }
+
+    // Load blue noise images from disk, and return their size and contents appended in a single
+    // array
+    fn load_blue_noise(path: &str) -> anyhow::Result<(usize, Vec<f32>)> {
+        let file = std::fs::File::open(path)?;
+        let mut archive = zip::ZipArchive::new(file)?;
+
+        if archive.is_empty() {
+            return Err(anyhow!("archive did not contain any files"));
         }
+
+        let mut image_size = None;
+        let mut pixels = Vec::new();
+
+        let file_count = archive.len();
+
+        for file_index in 0..file_count {
+            let mut file = archive.by_index(file_index)?;
+            if !file.is_file() {
+                continue;
+            }
+
+            let (width, height) = Self::parse_raw_f32img(&mut file, &mut pixels)
+                .with_context(|| format!("failed to read image: {}", file.name()))?;
+
+            if width != height {
+                return Err(anyhow!("found non-square blue noise image"))
+                    .with_context(|| format!("while reading image: {}", file.name()));
+            }
+
+            match image_size.as_mut() {
+                None => image_size = Some(width),
+                Some(size) if *size != width => {
+                    return Err(anyhow!(
+                        "blue-noise images in archive do not have same size"
+                    ))
+                }
+                _ => {}
+            }
+        }
+
+        match image_size {
+            None => Err(anyhow!("archive did not contain any images")),
+            Some(size) => Ok((size, pixels)),
+        }
+    }
+
+    fn parse_raw_f32img(
+        r: &mut impl std::io::Read,
+        pixels: &mut Vec<f32>,
+    ) -> anyhow::Result<(usize, usize)> {
+        fn read_u32(r: &mut impl std::io::Read) -> anyhow::Result<u32> {
+            let mut buffer = [0u8; 4];
+            r.read_exact(&mut buffer)?;
+            Ok(u32::from_be_bytes(buffer))
+        }
+
+        let width = read_u32(r)? as usize;
+        let height = read_u32(r)? as usize;
+
+        let pixel_count = width * height;
+        let old_len = pixels.len();
+        let new_len = old_len + pixel_count;
+        pixels.resize(new_len, 0.0);
+
+        let pixel_buffer = bytemuck::cast_slice_mut(&mut pixels[old_len..new_len]);
+        if let Err(e) = r.read_exact(pixel_buffer) {
+            pixels.truncate(old_len);
+            return Err(e.into());
+        }
+
+        for pixel in &mut pixels[old_len..new_len] {
+            *pixel = f32::from_bits(u32::from_be(f32::to_bits(*pixel)));
+        }
+
+        Ok((width, height))
     }
 
     fn create_bind_groups(gpu: &GpuContext, bindings: &Bindings) -> BindGroups {
@@ -514,15 +622,27 @@ impl Context {
         let old_position = util::view(&old_images.position);
         let new_position = util::view(&new_images.position);
 
+        let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: None,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         let (layout, bindings) = bind_group![
-            UniformImage(0 => (&old_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            Texture(0 => (&old_color, Float { filterable: true }, D2) in COMPUTE),
             UniformImage(1 => (&new_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            UniformImage(2 => (&old_position, ReadOnly, GBuffer::POSITION_FORMAT, D2) in COMPUTE),
+            Texture(2 => (&old_position, Float { filterable: true }, D2) in COMPUTE),
             UniformImage(3 => (&new_position, WriteOnly, GBuffer::POSITION_FORMAT, D2) in COMPUTE),
             Uniform(6 => (&bindings.uniform_buffer) in COMPUTE),
             Uniform(7 => (&bindings.old_uniform_buffer) in COMPUTE),
             Storage(8 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
             Storage(9 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
+            Sampler(10 => (&sampler) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -920,6 +1040,7 @@ impl Context {
             camera_forward: Vec3A::from(camera_forward),
             time,
             still_sample: self.bindings.uniforms.still_sample + 1,
+            frame_number: self.bindings.uniforms.frame_number.wrapping_add(1),
             ..self.bindings.uniforms
         };
 
@@ -927,14 +1048,14 @@ impl Context {
             .uniform_buffer
             .write(&self.gpu, 0, &[self.bindings.uniforms]);
 
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let randomness = (0..(1 << 16))
-            .map(|_| rng.gen_range(0.0..1.0))
-            .collect::<Vec<_>>();
-        self.bindings
-            .randomness_buffer
-            .write(&self.gpu, 0, &randomness);
+        // use rand::Rng;
+        // let mut rng = rand::thread_rng();
+        // let randomness = (0..(1 << 16))
+        //     .map(|_| rng.gen_range(0.0..1.0))
+        //     .collect::<Vec<_>>();
+        // self.bindings
+        //     .randomness_buffer
+        //     .write(&self.gpu, 0, &randomness);
     }
 }
 
@@ -1012,7 +1133,7 @@ impl GBuffer {
         util::create_texture(
             size,
             format,
-            Usage::COPY_SRC | Usage::COPY_DST | Usage::STORAGE,
+            Usage::COPY_SRC | Usage::COPY_DST | Usage::STORAGE | Usage::SAMPLED,
             gpu,
         )
     }

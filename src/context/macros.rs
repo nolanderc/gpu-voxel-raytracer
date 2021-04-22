@@ -61,6 +61,53 @@ macro_rules! bind_group {
         }
     };
 
+    // Texture
+    (@layout Texture($binding:expr => ($texture:expr, $sample_type:expr, $dimension:expr) in $visibility:expr)) => {
+        #[allow(unused_imports)]
+        wgpu::BindGroupLayoutEntry {
+            binding: $binding,
+            visibility: bind_group!(@visibility $visibility),
+            ty: wgpu::BindingType::Texture {
+                sample_type: {
+                    use wgpu::TextureSampleType::*;
+                    $sample_type
+                },
+                view_dimension: {
+                    use wgpu::TextureViewDimension::*;
+                    $dimension
+                },
+                multisampled: false
+            },
+            count: None,
+        }
+    };
+    (@resource Texture($binding:expr => ($texture:expr, $sample_type:expr, $dimension:expr) in $visibility:expr)) => {
+        wgpu::BindGroupEntry {
+            binding: $binding,
+            resource: wgpu::BindingResource::TextureView($texture),
+        }
+    };
+
+    // Sampler
+    (@layout Sampler($binding:expr => ($sampler:expr) in $visibility:expr)) => {
+        #[allow(unused_imports)]
+        wgpu::BindGroupLayoutEntry {
+            binding: $binding,
+            visibility: bind_group!(@visibility $visibility),
+            ty: wgpu::BindingType::Sampler {
+                filtering: true,
+                comparison: false,
+            },
+            count: None,
+        }
+    };
+    (@resource Sampler($binding:expr => ($sampler:expr) in $visibility:expr)) => {
+        wgpu::BindGroupEntry {
+            binding: $binding,
+            resource: wgpu::BindingResource::Sampler($sampler),
+        }
+    };
+
     // Storage
     (@layout Storage($binding:expr => ($buffer:expr, read_only: $read:expr) in $visibility:expr)) => {
         wgpu::BindGroupLayoutEntry {
