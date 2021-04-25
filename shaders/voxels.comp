@@ -7,13 +7,13 @@
 #define SKY_COLOR vec3(0.3, 0.7, 0.8)
 #define SUN_DIR vec3(0.2 * cos(0.1 * global_time), -0.2, 0.1 * sin(0.1 * global_time))
 #define SUN_COLOR (0.5 * vec3(5, 5, 3))
-#define SUN_SIZE .05
+#define SUN_SIZE 0.03
 
-#define SPECULARITY 0.1
+#define SPECULARITY 0.95
 #define EMIT_STRENGTH 4
 
 #define SAMPLE_BLENDING 0.1
-#define MAXIMUM_BLENDING SAMPLE_BLENDING
+#define MAXIMUM_BLENDING 0.05
 #define BLENDING_DISTANCE_CUTOFF 1e-2
 
 #define ALMOST_INFINITY (1 << 30)
@@ -426,7 +426,7 @@ void main() {
         }
     }
 
-    float next_blending = max(0.9 * blending, MAXIMUM_BLENDING);
+    float next_blending = max((1 - SAMPLE_BLENDING) * blending, MAXIMUM_BLENDING);
     if (still_sample <= 2) {
         next_blending = min(next_blending, 1.0 / still_sample);
     }
