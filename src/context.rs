@@ -837,8 +837,6 @@ impl Context {
                     if let Ok(key) = KeyCode::try_from(input.scancode) {
                         match input.state {
                             winit::event::ElementState::Pressed => {
-                                eprintln!("{:?} = {}", key, input.scancode);
-
                                 self.pressed_keys.insert(key);
                             }
                             winit::event::ElementState::Released => {

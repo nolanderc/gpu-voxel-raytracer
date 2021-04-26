@@ -1,6 +1,6 @@
 #version 450
 
-#define MAX_DEPTH 15
+#define MAX_DEPTH 16
 #define MAX_BOUNCES 3
 #define MAX_SAMPLES 1
 
@@ -123,7 +123,6 @@ uint current_octant(vec3 position, vec3 center) {
 struct Frame {
     int node;
     uint octant;
-    float exit;
 } stack[MAX_DEPTH];
 
 int iterations = 0;
@@ -202,20 +201,12 @@ bool cast_bounded_ray(
         bool has_next = next_time <= exit && transition != 0 && (directional_octant & transition) == 0;
 
         if (value > 0) {
-            // Push next to stack, and continue with child
-            if (has_next) {
-                stack[top].node = node;
-                stack[top].exit = exit;
-                // stack[top].center = center;
-                // stack[top].size = size;
-                stack[top].octant = (next_octant << 3) | octant;
-                top++;
-            } else {
-                // mark node as complete
-                stack[top].node = -1;
-                stack[top].octant = octant;
-                top++;
-            }
+            // We need to recurse on a child.
+            //
+            // Push next octant to stack, and continue with child
+            stack[top].node = has_next ? node : -1;
+            stack[top].octant = octant | (next_octant << 3);
+            top++;
 
             node = value;
             center = octant_center(center, size, octant);
@@ -238,13 +229,14 @@ bool cast_bounded_ray(
                 size *= 2;
                 uint parent_octant = stack[top].octant & 0x7;
                 center = octant_center(center, size, ~parent_octant);
-            } while(/* skip complete nodes */node < 0);
+            } while(node == -1 /* node is complete */);
 
             time = exit;
 
-            exit = stack[top].exit;
-            // center = stack[top].center;
-            // size = stack[top].size;
+            // compute new `exit`
+            float new_entry;
+            ray_cube_intersection(ray_origin, ray_inv_dir, center, 0.5 * size, new_entry, exit);
+
             octant = (stack[top].octant >> 3) & 0x7;
         }
 
@@ -398,7 +390,7 @@ void main() {
                 vec4(old_camera_up.xyz, 0),
                 vec4(old_camera_forward.xyz, 0),
                 vec4(old_camera_origin.xyz, 1)
-                );
+            );
 
         vec4 old_screen = inverse(old_screen_to_world) * vec4(world_pos, 1);
         // old_screen = new_screen;
