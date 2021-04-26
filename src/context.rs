@@ -12,6 +12,10 @@ use anyhow::Context as _;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::scancodes::Scancode as KeyCode;
+
+use std::convert::TryFrom;
+
 pub(crate) struct Context {
     window: Arc<winit::window::Window>,
 
@@ -31,7 +35,7 @@ pub(crate) struct Context {
     stopwatch: Stopwatch,
     shader_watcher: DirectoryWatcher,
 
-    pressed_keys: HashSet<winit::event::VirtualKeyCode>,
+    pressed_keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
 
     camera: crate::camera::Camera,
@@ -828,11 +832,13 @@ impl Context {
                     self.resize(new_size).context("failed to resize")?;
                 }
                 WindowEvent::KeyboardInput { input, .. } => {
-                    use winit::event::{ElementState::Pressed, VirtualKeyCode as Key};
+                    use winit::event::ElementState::Pressed;
 
-                    if let Some(key) = input.virtual_keycode {
+                    if let Ok(key) = KeyCode::try_from(input.scancode) {
                         match input.state {
                             winit::event::ElementState::Pressed => {
+                                eprintln!("{:?} = {}", key, input.scancode);
+
                                 self.pressed_keys.insert(key);
                             }
                             winit::event::ElementState::Released => {
@@ -841,11 +847,8 @@ impl Context {
                         }
 
                         match key {
-                            Key::Escape => *flow = ControlFlow::Exit,
-                            Key::Space if input.state == Pressed => {
-                                self.bindings.uniforms.light.position = self.camera.position
-                            }
-                            Key::Tab if input.state == Pressed => {
+                            KeyCode::Escape => *flow = ControlFlow::Exit,
+                            KeyCode::Tab if input.state == Pressed => {
                                 self.cursor_grabbed = !self.cursor_grabbed;
                                 if self.window.set_cursor_grab(self.cursor_grabbed).is_ok() {
                                     self.window.set_cursor_visible(!self.cursor_grabbed);
@@ -892,42 +895,39 @@ impl Context {
 // Rendering
 impl Context {
     pub fn update(&mut self, dt: f32) {
-        use winit::event::VirtualKeyCode as Key;
-
         self.camera.direction = Vec3::new(
             self.yaw.sin() * self.pitch.cos(),
             self.pitch.sin(),
             self.yaw.cos() * self.pitch.cos(),
         );
 
-        let pressed = |keys: &[Key]| keys.iter().any(|key| self.pressed_keys.contains(key));
+        let pressed = |keys: &[KeyCode]| keys.iter().any(|key| self.pressed_keys.contains(key));
 
         let [right, _, forward] = self.camera.axis();
         let mut movement = Vec3::zero();
 
-        // I'm primarily a Dvorak user, so excuse the key bindings ;)
-        if pressed(&[Key::Up, Key::Comma]) {
+        if pressed(&[KeyCode::W]) {
             movement += forward;
         }
-        if pressed(&[Key::Down, Key::O]) {
+        if pressed(&[KeyCode::S]) {
             movement -= forward;
         }
-        if pressed(&[Key::Right, Key::E]) {
+        if pressed(&[KeyCode::D]) {
             movement += right;
         }
-        if pressed(&[Key::Left, Key::A]) {
+        if pressed(&[KeyCode::A]) {
             movement -= right;
         }
-        if pressed(&[Key::PageUp, Key::Period]) {
+        if pressed(&[KeyCode::E]) {
             movement.y += 1.0;
         }
-        if pressed(&[Key::PageDown, Key::Apostrophe]) {
+        if pressed(&[KeyCode::Q]) {
             movement.y -= 1.0;
         }
         if movement != Vec3::zero() {
-            let speed = if pressed(&[Key::LControl, Key::RControl]) {
+            let speed = if pressed(&[KeyCode::LeftControl]) {
                 0.02
-            } else if pressed(&[Key::LShift, Key::RShift]) {
+            } else if pressed(&[KeyCode::LeftShift]) {
                 1.0
             } else {
                 0.2
@@ -951,8 +951,8 @@ impl Context {
             let mut cpass =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
 
-            let local_x = 16;
-            let local_y = 16;
+            let local_x = 4;
+            let local_y = 4;
             let groups_x = (self.output_size.width + local_x - 1) / local_x;
             let groups_y = (self.output_size.height + local_y - 1) / local_y;
 

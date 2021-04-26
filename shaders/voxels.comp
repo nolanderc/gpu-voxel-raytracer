@@ -1,6 +1,6 @@
 #version 450
 
-#define MAX_DEPTH 15
+#define MAX_DEPTH 10
 #define MAX_BOUNCES 3
 #define MAX_SAMPLES 1
 
@@ -9,7 +9,7 @@
 #define SUN_COLOR (0.5 * vec3(5, 5, 3))
 #define SUN_SIZE 0.03
 
-#define SPECULARITY 0.95
+#define SPECULARITY 0.05
 #define EMIT_STRENGTH 4
 
 #define SAMPLE_BLENDING 0.1
@@ -23,7 +23,7 @@
 
 #define PI 3.14159265358979
 
-layout(local_size_x = 16, local_size_y = 16) in;
+layout(local_size_x = 4, local_size_y = 4) in;
 
 layout(binding = 0) uniform texture2D temporal_image;
 layout(binding = 10) uniform sampler temporal_sampler;

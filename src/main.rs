@@ -5,6 +5,7 @@ extern crate tracing;
 mod macros;
 
 mod vox;
+mod scancodes;
 
 mod context;
 mod camera;
