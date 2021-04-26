@@ -277,7 +277,7 @@ impl Context {
         fn alloc_node(nodes: &mut Vec<i32>) -> usize {
             let index = nodes.len();
             nodes.extend_from_slice(&[0; 8]);
-            index
+            index / 8
         }
 
         fn insert_node(
@@ -297,15 +297,15 @@ impl Context {
                 if extent == 1 {
                     let [m, r, g, b] = color;
                     let [m, r, g, b] = [m as i32, r as i32, g as i32, b as i32];
-                    nodes[current + octant] =
+                    nodes[8 * current + octant] =
                         (1 << 31) | ((m & 0x7f) << 24) | (r << 16) | (g << 8) | b;
                     return;
                 } else {
-                    let value = nodes[current + octant];
+                    let value = nodes[8 * current + octant];
                     let child = match value {
                         0 => {
                             let node = alloc_node(nodes);
-                            nodes[current + octant] = node as i32;
+                            nodes[8 * current + octant] = node as i32;
                             node
                         }
                         _ if value > 0 => value as usize,
@@ -951,8 +951,8 @@ impl Context {
             let mut cpass =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
 
-            let local_x = 4;
-            let local_y = 4;
+            let local_x = 8;
+            let local_y = 8;
             let groups_x = (self.output_size.width + local_x - 1) / local_x;
             let groups_y = (self.output_size.height + local_y - 1) / local_y;
 
