@@ -1,5 +1,5 @@
 use crate::linear::Vec3;
-use crate::{Ray, Size};
+use crate::Size;
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct Camera {
@@ -25,40 +25,5 @@ impl Camera {
         let forward_ray = (-w / 2.0) * right + (h / 2.0) * up + (h / 2.0) / fov_scale * forward;
 
         [right, up, forward_ray]
-    }
-
-    pub fn cast_rays(
-        &self,
-        size: Size,
-    ) -> impl rayon::iter::IndexedParallelIterator<Item = (Ray, (u32, u32))> {
-        use rayon::prelude::*;
-
-        let [right, up, forward] = self.axis_scaled(size);
-
-        let origin = self.position;
-
-        (0..size.width * size.height)
-            .into_par_iter()
-            .map(move |index| {
-                let row = index / size.width;
-                let col = index % size.width;
-
-                let screen_dir = col as f32 * right - row as f32 * up + forward;
-                let coord = (col, row);
-                let ray = Ray {
-                    origin,
-                    direction: screen_dir.norm(),
-                };
-                (ray, coord)
-            })
-    }
-
-    fn cast_ray_single(&self, x: u32, y: u32, size: Size) -> Ray {
-        let [right, up, forward] = self.axis_scaled(size);
-        let screen_dir = x as f32 * right - y as f32 * up + forward;
-        Ray {
-            origin: self.position,
-            direction: screen_dir.norm(),
-        }
     }
 }

@@ -72,7 +72,7 @@ struct Bindings {
 struct GBuffer {
     size: crate::Size,
     color: wgpu::Texture,
-    position: wgpu::Texture,
+    normal_depth: wgpu::Texture,
     normal: wgpu::Texture,
 }
 
@@ -364,7 +364,7 @@ impl Context {
     fn create_voxels() -> Vec<([i16; 3], [u8; 4])> {
         let mut voxels = Vec::new();
 
-        let radius = 64i32;
+        let radius = 512i32;
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -453,8 +453,8 @@ impl Context {
 
     fn create_octree(voxels: Vec<([i16; 3], [u8; 4])>) -> Vec<i32> {
         let depth = Self::voxel_depth(voxels.iter().map(|(pos, _)| *pos));
-        let root_size = 2.0;
-        let child_size = root_size / depth as f32 / 2.0;
+        let root_size = (1 << depth) as f32;
+        let child_size = 1.0;
 
         let mut octree = vec![
             // center
@@ -623,8 +623,8 @@ impl Context {
         let old_color = util::view(&old_images.color);
         let new_color = util::view(&new_images.color);
 
-        let old_position = util::view(&old_images.position);
-        let new_position = util::view(&new_images.position);
+        let old_normal_depth = util::view(&old_images.normal_depth);
+        let new_normal_depth = util::view(&new_images.normal_depth);
 
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: None,
@@ -640,8 +640,8 @@ impl Context {
         let (layout, bindings) = bind_group![
             Texture(0 => (&old_color, Float { filterable: true }, D2) in COMPUTE),
             UniformImage(1 => (&new_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            Texture(2 => (&old_position, Float { filterable: true }, D2) in COMPUTE),
-            UniformImage(3 => (&new_position, WriteOnly, GBuffer::POSITION_FORMAT, D2) in COMPUTE),
+            Texture(2 => (&old_normal_depth, Float { filterable: true }, D2) in COMPUTE),
+            UniformImage(3 => (&new_normal_depth, WriteOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
             Uniform(6 => (&bindings.uniform_buffer) in COMPUTE),
             Uniform(7 => (&bindings.old_uniform_buffer) in COMPUTE),
             Storage(8 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
@@ -653,12 +653,15 @@ impl Context {
     }
 
     fn create_denoise_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
-        let new_color = util::view(&bindings.new_g_buffer.color);
         let denoise_color = util::view(&bindings.denoised_color);
+        let new_color = util::view(&bindings.new_g_buffer.color);
+        let new_normal_depth = util::view(&bindings.new_g_buffer.normal_depth);
 
         let (layout, bindings) = bind_group![
             UniformImage(0 => (&denoise_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(1 => (&new_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            UniformImage(2 => (&new_normal_depth, ReadOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
+            Uniform(3 => (&bindings.uniform_buffer) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -924,11 +927,11 @@ impl Context {
         }
         if movement != Vec3::zero() {
             let speed = if pressed(&[KeyCode::LeftControl]) {
-                0.02
+                0.5
             } else if pressed(&[KeyCode::LeftShift]) {
-                1.0
+                50.0
             } else {
-                0.2
+                5.0
             };
             self.camera.position += speed * dt * movement.norm();
             self.bindings.uniforms.still_sample = 0;
@@ -1045,15 +1048,6 @@ impl Context {
         self.bindings
             .uniform_buffer
             .write(&self.gpu, 0, &[self.bindings.uniforms]);
-
-        // use rand::Rng;
-        // let mut rng = rand::thread_rng();
-        // let randomness = (0..(1 << 16))
-        //     .map(|_| rng.gen_range(0.0..1.0))
-        //     .collect::<Vec<_>>();
-        // self.bindings
-        //     .randomness_buffer
-        //     .write(&self.gpu, 0, &randomness);
     }
 }
 
@@ -1106,18 +1100,18 @@ impl DirectoryWatcher {
 
 impl GBuffer {
     pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
-    pub const POSITION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+    pub const NORMAL_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
     pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
     fn new(gpu: &GpuContext, size: crate::Size) -> GBuffer {
         let color = Self::create_storage_texture(size, GBuffer::COLOR_FORMAT, gpu);
-        let position = Self::create_storage_texture(size, GBuffer::POSITION_FORMAT, gpu);
+        let normal_depth = Self::create_storage_texture(size, GBuffer::NORMAL_DEPTH_FORMAT, gpu);
         let normal = Self::create_storage_texture(size, GBuffer::NORMAL_FORMAT, gpu);
 
         GBuffer {
             size,
             color,
-            position,
+            normal_depth,
             normal,
         }
     }
@@ -1138,7 +1132,7 @@ impl GBuffer {
 
     fn copy_from(&self, other: &GBuffer, encoder: &mut wgpu::CommandEncoder) {
         util::copy_entire_texture_to_texture(&other.color, &self.color, self.size, encoder);
-        util::copy_entire_texture_to_texture(&other.position, &self.position, self.size, encoder);
+        util::copy_entire_texture_to_texture(&other.normal_depth, &self.normal_depth, self.size, encoder);
         util::copy_entire_texture_to_texture(&other.normal, &self.normal, self.size, encoder);
     }
 }

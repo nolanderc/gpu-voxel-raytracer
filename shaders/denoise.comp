@@ -4,13 +4,32 @@ layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(rgba32f, binding = 0) uniform writeonly image2D output_colors;
 layout(rgba32f, binding = 1) uniform readonly image2D colors;
+layout(rgba32f, binding = 2) uniform readonly image2D normals_depths;
 
-#define SIGMA_DISTANCE 1
-#define SIGMA_RANGE 1
+layout(binding = 3) uniform uniforms {
+    vec4 camera_origin;
+    vec4 camera_right;
+    vec4 camera_up;
+    vec4 camera_forward;
+    vec4 light;
+    float global_time;
+    uint still_sample;
+    uint frame_number;
+};
+
+#define SIGMA_DISTANCE 2
+#define SIGMA_RANGE 1.5
 #define RADIUS 0
 
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+
+    // Get world coordinates of current pixel
+    vec3 ray_dir = normalize(
+            (coord.x) * camera_right.xyz 
+            - (coord.y) * camera_up.xyz 
+            + camera_forward.xyz
+            );
 
     ivec2 size = imageSize(output_colors);
 
@@ -20,7 +39,10 @@ void main() {
     float sigma_distance = 2 * pow(SIGMA_DISTANCE, 2);
     float sigma_range = 2 * pow(SIGMA_RANGE, 2);
 
-    vec4 center = imageLoad(colors, coord);
+    vec4 center_color = imageLoad(colors, coord);
+    vec4 center_normal_depth = imageLoad(normals_depths, coord);
+
+    float depth_bias = max(0, dot(center_normal_depth.xyz, -ray_dir));
 
     for (int dy = -RADIUS; dy <= RADIUS; dy++) {
         for (int dx = -RADIUS; dx <= RADIUS; dx++) {
@@ -28,18 +50,28 @@ void main() {
             int ny = coord.y + dy;
 
             if (0 <= nx && nx < size.x && 0 <= ny && ny < size.y) {
-                vec4 window = imageLoad(colors, ivec2(nx, ny));
+                vec4 window_color = imageLoad(colors, ivec2(nx, ny));
+                vec4 window_normal_depth = imageLoad(normals_depths, ivec2(nx, ny));
 
-                vec3 color_delta = center.rgb - window.rgb;
-                float factor_range = dot(color_delta, color_delta) / sigma_range;
+                vec3 color_delta = center_color.rgb - window_color.rgb;
+                vec3 normal_delta = center_normal_depth.xyz - window_normal_depth.xyz;
+                float depth_delta = log(abs(center_normal_depth.w)) - log(abs(window_normal_depth.w));
+
+                float factor_range = (
+                        dot(color_delta, color_delta)
+                        + 5 * dot(normal_delta, normal_delta)
+                        + 1e4 * pow(depth_bias, 2) * pow(depth_delta, 2)
+                    ) / sigma_range;
                 float factor_distance = (dx*dx + dy*dy) / sigma_distance;
                 float factor = exp(-factor_range - factor_distance);
 
                 normalization += factor;
-                sum += window.xyz * factor;
+                sum += window_color.xyz * factor;
             }
         }
     }
 
-    imageStore(output_colors, coord, vec4(RADIUS == 0 ? center.xyz : sum / normalization, 1));
+    vec3 out_color = RADIUS == 0 ? center_color.rgb : sum / normalization;
+    // out_color = vec3(-log(center_normal_depth.w) / 100);
+    imageStore(output_colors, coord, vec4(out_color, 1));
 }

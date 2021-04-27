@@ -1,16 +1,19 @@
 #version 450
 
 #define MAX_DEPTH 16
-#define MAX_BOUNCES 3
+#define MAX_BOUNCES 4
 #define MAX_SAMPLES 1
 
-#define SKY_COLOR vec3(0.3, 0.7, 0.8)
+#define SKY_COLOR vec3(0.3, 0.5, 0.7)
+// #define SKY_COLOR vec3(0.01)
+
 #define SUN_DIR vec3(0.2 * cos(0.1 * global_time), -0.2, 0.1 * sin(0.1 * global_time))
-#define SUN_COLOR (0.5 * vec3(5, 5, 3))
-#define SUN_SIZE 0.03
+#define SUN_STRENGTH 10
+#define SUN_COLOR (SUN_STRENGTH * normalize(vec3(5, 5, 3)))
+#define SUN_SIZE 0.003
 
 #define SPECULARITY 0.05
-#define EMIT_STRENGTH 4
+#define EMIT_STRENGTH 10
 
 #define SAMPLE_BLENDING 0.9
 #define MAXIMUM_BLENDING 0.05
@@ -30,8 +33,8 @@ layout(binding = 10) uniform sampler temporal_sampler;
 
 layout(rgba32f, binding = 1) uniform writeonly image2D output_image;
 
-layout(binding = 2) uniform texture2D old_positions;
-layout(rgba32f, binding = 3) uniform writeonly image2D new_positions;
+layout(binding = 2) uniform texture2D old_normals_depths;
+layout(rgba32f, binding = 3) uniform writeonly image2D new_normals_depths;
 
 layout(binding = 6) uniform uniforms {
     vec4 camera_origin;
@@ -283,6 +286,79 @@ vec3 random_hemisphere(vec3 normal) {
     return reflect_dir;
 }
 
+vec4 temporal_blend(vec3 color, vec3 normal, float depth) {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+
+    // Get world coordinates of current pixel
+    vec3 ray_dir = normalize(
+            (coord.x) * camera_right.xyz 
+            - (coord.y) * camera_up.xyz 
+            + camera_forward.xyz
+            );
+    vec3 world_pos = camera_origin.xyz + depth * ray_dir;
+
+
+    // By default, only use new color: no blending with old color
+    vec4 old_color = vec4(0);
+    float blending = 1;
+
+
+    if (depth >= 0) {
+        // Convert world coordinates to pixel coordinates in previous frame
+        mat4 old_screen_to_world = mat4(
+                vec4(old_camera_right.xyz, 0),
+                vec4(old_camera_up.xyz, 0),
+                vec4(old_camera_forward.xyz, 0),
+                vec4(old_camera_origin.xyz, 1)
+            );
+
+        mat4 old_world_to_screen = inverse(old_screen_to_world);
+
+        vec4 old_screen = old_world_to_screen * vec4(world_pos, 1);
+        old_screen.xy /= old_screen.z; // Perspective division
+
+        // Get pixel coordinate in normalized coordinate space
+        ivec2 size = textureSize(sampler2D(temporal_image, temporal_sampler), 0);
+        vec2 tex_coord = (old_screen.xy + vec2(0.5, -0.5)) * vec2(1.0 / (size.x), -1.0 / (size.y));
+
+        // Sample from the old frame, if the pixel exists in it
+        if (0 <= tex_coord.x && tex_coord.x <= 1 && 0 <= tex_coord.y && tex_coord.y <= 1) {
+            // Get the position used to sample the pixel in the previous frame
+            vec4 old_normal_depth = texture(sampler2D(old_normals_depths, temporal_sampler), tex_coord);
+            // vec3 old_normal = old_normal_depth.xyz;
+            float old_depth = old_normal_depth.w;
+
+            vec3 old_ray_dir = normalize(
+                    int(old_screen.x + 0.5) * old_camera_right.xyz 
+                    + int(old_screen.y - 0.5) * old_camera_up.xyz 
+                    + old_camera_forward.xyz
+                );
+            vec3 old_position = old_camera_origin.xyz + old_depth * old_ray_dir;
+
+            // Direction from the surface to the camera.
+            vec3 camera_dir = normalize(camera_origin.xyz - world_pos);
+
+            float bias = max(0.1, dot(camera_dir, normal));
+            float dist = distance(old_position, world_pos);
+
+            bool same_position = bias * dist < BLENDING_DISTANCE_CUTOFF * depth;
+            if (same_position) {
+                old_color = texture(sampler2D(temporal_image, temporal_sampler), tex_coord); 
+                blending = old_color.a;
+            }
+        }
+    }
+
+    float next_blending = max(SAMPLE_BLENDING * blending, MAXIMUM_BLENDING);
+    if (still_sample <= 2) {
+        next_blending = min(next_blending, 1.0 / still_sample);
+    }
+
+    vec3 new_color = depth >= 0 ? mix(old_color.rgb, color, blending) : color;
+    new_color = clamp(new_color, 0, 1);
+    return vec4(new_color, next_blending);
+}
+
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
 
@@ -290,21 +366,21 @@ void main() {
     vec3 albedo = vec3(0);
     vec3 world_pos = vec3(ALMOST_INFINITY);
     vec3 first_normal = vec3(ALMOST_INFINITY);
-    float first_time = 0;
+    float first_time = -1;
     bool hit = false;
     int first_node = 0;
 
     for (int sampl = 0; sampl < MAX_SAMPLES; sampl++) {
         vec3 ray_origin = camera_origin.xyz;
         vec3 ray_dir = normalize(
-            (coord.x + 0.5) * camera_right.xyz 
-            - (coord.y + 0.5) * camera_up.xyz 
+            (coord.x) * camera_right.xyz 
+            - (coord.y) * camera_up.xyz 
             + camera_forward.xyz
         );
 
         vec3 sample_color = vec3(0);
         vec3 blending_factor = vec3(1);
-        uint rays = 1;
+        uint ambient_rays = 0;
 
         for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
             float time;
@@ -343,7 +419,6 @@ void main() {
                 );
 
                 if (!sun_obstructed) {
-                    //rays++;
                     sample_color += SUN_COLOR * color * blending_factor * mix(1, 0, SPECULARITY) * max(0, dot(normal, normalize(-light_dir)));
                 }
 
@@ -365,69 +440,23 @@ void main() {
                 }
 
                 // hit the sky
+                ambient_rays++;
+
                 float sun_power = pow(
                     max(0, dot(ray_dir, normalize(-SUN_DIR))), 
                     1.0 / pow(SUN_SIZE, 2)
                 );
-                sample_color += (SKY_COLOR + SUN_COLOR * sun_power) * blending_factor;
-                break;
+                sample_color += (SKY_COLOR + SUN_COLOR * sun_power) * blending_factor / ambient_rays;
+                // break;
             }
         }
 
-        out_color += sample_color / rays;
+        out_color += sample_color;
     }
 
     out_color /= MAX_SAMPLES;
 
-    vec4 old_color = vec4(out_color, 1);
-
-    float normal_encoding = abs(dot(first_normal, vec3(0.5, 2.5, 4.5))) + dot(first_normal, vec3(0.5));
-
-    float blending = 1;
-    if (hit) {
-        mat4 old_screen_to_world = mat4(
-                vec4(old_camera_right.xyz, 0),
-                vec4(old_camera_up.xyz, 0),
-                vec4(old_camera_forward.xyz, 0),
-                vec4(old_camera_origin.xyz, 1)
-            );
-
-        vec4 old_screen = inverse(old_screen_to_world) * vec4(world_pos, 1);
-        // old_screen = new_screen;
-        old_screen.xyz /= old_screen.z;
-        ivec2 old_coord = ivec2(old_screen.x, -old_screen.y);
-
-        ivec2 size = textureSize(sampler2D(temporal_image, temporal_sampler), 0);
-
-        if (0 <= old_coord.x && old_coord.x < size.x && 0 <= old_coord.y && old_coord.y < size.y) {
-            vec2 tex_coord = old_screen.xy * vec2(1.0 / size.x, -1.0 / size.y);
-
-            vec4 old_position = texture(sampler2D(old_positions, temporal_sampler), tex_coord);
-            vec3 old_world_pos = old_position.xyz;
-            float old_normal_encoding = old_position.w;
-
-            vec3 camera_dir = normalize(camera_origin.xyz - world_pos);
-
-            float bias = max(0.1, dot(camera_dir, first_normal));
-            float dist = distance(world_pos, old_world_pos);
-
-            bool same_position = bias * dist < 1e-2 * child_size;
-            bool same_normal = normal_encoding == old_normal_encoding 
-                || bias * dist < 1e-1 * child_size * first_time;
-
-            if (same_normal && same_position) {
-                old_color = texture(sampler2D(temporal_image, temporal_sampler), tex_coord); 
-                blending = old_color.a;
-            }
-        }
-    }
-
-    float next_blending = max(SAMPLE_BLENDING * blending, MAXIMUM_BLENDING);
-    if (still_sample <= 2) {
-        next_blending = min(next_blending, 1.0 / still_sample);
-    }
-
-    vec3 new_color = hit ? mix(old_color.rgb, out_color, blending) : out_color;
-    imageStore(output_image, coord, vec4(new_color, next_blending));
-    imageStore(new_positions, coord, vec4(world_pos, normal_encoding));
+    vec4 blended = temporal_blend(out_color, first_normal, first_time);
+    imageStore(output_image, coord, blended);
+    imageStore(new_normals_depths, coord, vec4(first_normal, first_time));
 }
