@@ -26,8 +26,15 @@ impl<T: bytemuck::Pod> Buffer<T> {
     }
 
     pub fn write(&self, gpu: &GpuContext, offset: usize, data: &[T]) {
-        gpu.queue
-            .write_buffer(&self.raw, offset as u64, bytemuck::cast_slice(data));
+        gpu.queue.write_buffer(
+            &self.raw,
+            offset as u64 * std::mem::size_of::<T>() as u64,
+            bytemuck::cast_slice(data),
+        );
+    }
+
+    pub fn len(&self) -> usize {
+        self.count
     }
 
     pub fn size(&self) -> Option<wgpu::BufferSize> {

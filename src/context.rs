@@ -26,6 +26,7 @@ pub(crate) struct Context {
     pipeline: wgpu::RenderPipeline,
     voxel_pipeline: wgpu::ComputePipeline,
     denoise_pipeline: wgpu::ComputePipeline,
+    gui_pipeline: wgpu::RenderPipeline,
 
     bindings: Bindings,
     bind_groups: BindGroups,
@@ -35,12 +36,51 @@ pub(crate) struct Context {
     stopwatch: Stopwatch,
     shader_watcher: DirectoryWatcher,
 
-    pressed_keys: HashSet<KeyCode>,
-    cursor_grabbed: bool,
+    input: Input,
 
     camera: crate::camera::Camera,
     pitch: f32,
     yaw: f32,
+
+    gui: Gui,
+}
+
+struct Input {
+    pressed_keys: HashSet<KeyCode>,
+    cursor_grabbed: bool,
+    mouse_position: winit::dpi::LogicalPosition<f64>,
+    modifiers: winit::event::ModifiersState,
+}
+
+struct Gui {
+    ctx: egui::CtxRef,
+    events: Vec<egui::Event>,
+    meshes: Vec<GuiMesh>,
+}
+
+struct GuiMesh {
+    indices: Buffer<u32>,
+    vertices: Buffer<GuiVertex>,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct GuiVertex {
+    position: [f32; 2],
+    tex_coord: [f32; 2],
+    color: [u8; 4],
+}
+
+impl Gui {
+    pub const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+
+    pub fn new() -> Self {
+        Gui {
+            ctx: egui::CtxRef::default(),
+            events: Vec::new(),
+            meshes: Vec::new(),
+        }
+    }
 }
 
 struct DirectoryWatcher {
@@ -67,6 +107,42 @@ struct Bindings {
     new_g_buffer: GBuffer,
 
     denoised_color: wgpu::Texture,
+
+    gui_uniforms: Buffer<GuiUniforms>,
+    gui_texture: GuiTexture,
+    near_sampler: wgpu::Sampler,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct GuiUniforms {
+    width: f32,
+    height: f32,
+}
+
+struct GuiTexture {
+    version: Option<u64>,
+    size: crate::Size,
+    texture: wgpu::Texture,
+}
+
+impl GuiTexture {
+    pub fn empty(gpu: &GpuContext) -> Self {
+        let size = [1, 1].into();
+        let texture = util::create_texture_with_data(
+            size,
+            Gui::TEXTURE_FORMAT,
+            wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::COPY_DST,
+            gpu,
+            &[0; 4],
+        );
+
+        GuiTexture {
+            version: None,
+            size,
+            texture,
+        }
+    }
 }
 
 struct GBuffer {
@@ -80,6 +156,7 @@ struct BindGroups {
     render: BindGroup,
     voxel: BindGroup,
     denoise: BindGroup,
+    gui: BindGroup,
 }
 
 struct BindGroup {
@@ -103,6 +180,15 @@ impl From<Vec3> for Vec3A {
     }
 }
 
+impl From<[f32; 3]> for Vec3A {
+    fn from(vector: [f32; 3]) -> Self {
+        Vec3A {
+            vector: vector.into(),
+            _padding: 0.0,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -114,6 +200,40 @@ struct Uniforms {
     time: f32,
     still_sample: u32,
     frame_number: u32,
+
+    emit_strength: f32,
+    sun_strength: f32,
+    sun_size: f32,
+    sun_yaw: f32,
+    sun_pitch: f32,
+
+    sky_color: [f32; 3],
+}
+
+impl Default for Uniforms {
+    fn default() -> Self {
+        Uniforms {
+            camera_origin: [0.0; 3].into(),
+            camera_right: [0.0; 3].into(),
+            camera_up: [0.0; 3].into(),
+            camera_forward: [0.0; 3].into(),
+            light: PointLight {
+                position: [0.0; 3].into(),
+                brightness: 0.0,
+            },
+            time: 0.0,
+            still_sample: 0,
+            frame_number: 0,
+
+            emit_strength: 4.0,
+            sun_strength: 1.0,
+            sun_size: 0.05,
+            sun_yaw: 1.32,
+            sun_pitch: 2.32,
+
+            sky_color: [0.5; 3],
+        }
+    }
 }
 
 #[repr(C)]
@@ -145,6 +265,7 @@ impl Stopwatch {
 struct FpsCounter {
     prev_time: std::time::Instant,
     frames: u32,
+    fps: f32,
 }
 
 impl FpsCounter {
@@ -152,20 +273,18 @@ impl FpsCounter {
         FpsCounter {
             prev_time: std::time::Instant::now(),
             frames: 0,
+            fps: f32::NAN,
         }
     }
 
-    pub fn tick(&mut self) -> Option<f32> {
+    pub fn tick(&mut self) {
         let now = std::time::Instant::now();
         let elapsed = (now - self.prev_time).as_secs_f32();
         self.frames += 1;
         if elapsed > 0.25 {
-            let fps = self.frames as f32 / elapsed;
+            self.fps = self.frames as f32 / elapsed;
             self.prev_time = now;
             self.frames = 0;
-            Some(fps)
-        } else {
-            None
         }
     }
 }
@@ -192,6 +311,7 @@ impl Context {
         let pipeline = Self::create_render_pipeline(&bind_groups.render, &gpu)?;
         let voxel_pipeline = Self::create_voxel_pipeline(&bind_groups.voxel, &gpu)?;
         let denoise_pipeline = Self::create_denoise_pipeline(&bind_groups.denoise, &gpu)?;
+        let gui_pipeline = Self::create_gui_pipeline(&bind_groups.gui, &gpu)?;
 
         let camera = crate::camera::Camera {
             position: Vec3::new(0.0, 0.0, -2.0),
@@ -214,18 +334,25 @@ impl Context {
             pipeline,
             voxel_pipeline,
             denoise_pipeline,
+            gui_pipeline,
 
             start: std::time::Instant::now(),
             stopwatch: Stopwatch::new(),
             fps_counter: FpsCounter::new(),
             shader_watcher,
 
-            pressed_keys: HashSet::new(),
-            cursor_grabbed: true,
+            input: Input {
+                pressed_keys: HashSet::new(),
+                cursor_grabbed: false,
+                mouse_position: winit::dpi::LogicalPosition::new(-1.0, -1.0),
+                modifiers: Default::default(),
+            },
 
             camera,
             pitch: 0.0,
             yaw: 0.0,
+
+            gui: Gui::new(),
         })
     }
 
@@ -364,7 +491,7 @@ impl Context {
     fn create_voxels() -> Vec<([i16; 3], [u8; 4])> {
         let mut voxels = Vec::new();
 
-        let radius = 512i32;
+        let radius = 32i32;
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -475,7 +602,7 @@ impl Context {
     fn create_bindings(gpu: &GpuContext, output_size: crate::Size) -> anyhow::Result<Bindings> {
         use wgpu::BufferUsage as Usage;
 
-        let mut uniforms = <Uniforms as bytemuck::Zeroable>::zeroed();
+        let mut uniforms = Uniforms::default();
         uniforms.light = PointLight {
             position: Vec3::new(0.4, -0.4, 0.02),
             brightness: 0.05,
@@ -505,6 +632,26 @@ impl Context {
         let randomness_buffer =
             Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &blue_noise_pixels);
 
+        let gui_uniforms = Buffer::new(
+            gpu,
+            Usage::UNIFORM | Usage::COPY_DST,
+            &[GuiUniforms {
+                width: output_size.width as f32,
+                height: output_size.height as f32,
+            }],
+        );
+
+        let near_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: None,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         let bindings = Bindings {
             old_uniform_buffer,
             uniform_buffer,
@@ -515,7 +662,12 @@ impl Context {
             old_g_buffer,
             new_g_buffer,
 
+            near_sampler,
+
             denoised_color,
+
+            gui_uniforms,
+            gui_texture: GuiTexture::empty(gpu),
         };
 
         Ok(bindings)
@@ -603,6 +755,7 @@ impl Context {
             render: Self::create_render_bind_group(gpu, bindings),
             voxel: Self::create_voxel_bind_group(gpu, bindings),
             denoise: Self::create_denoise_bind_group(gpu, bindings),
+            gui: Self::create_gui_bind_group(gpu, bindings),
         }
     }
 
@@ -626,17 +779,6 @@ impl Context {
         let old_normal_depth = util::view(&old_images.normal_depth);
         let new_normal_depth = util::view(&new_images.normal_depth);
 
-        let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: None,
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
         let (layout, bindings) = bind_group![
             Texture(0 => (&old_color, Float { filterable: true }, D2) in COMPUTE),
             UniformImage(1 => (&new_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
@@ -646,7 +788,7 @@ impl Context {
             Uniform(7 => (&bindings.old_uniform_buffer) in COMPUTE),
             Storage(8 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
             Storage(9 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
-            Sampler(10 => (&sampler) in COMPUTE),
+            Sampler(10 => (&bindings.near_sampler) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -665,6 +807,32 @@ impl Context {
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
+    }
+
+    fn gui_bindings<'a>(
+        bindings: &'a Bindings,
+        texture: &'a wgpu::TextureView,
+    ) -> (
+        [wgpu::BindGroupLayoutEntry; 3],
+        [wgpu::BindGroupEntry<'a>; 3],
+    ) {
+        bind_group![
+            Uniform(0 => (&bindings.gui_uniforms) in VERTEX),
+            Sampler(1 => (&bindings.near_sampler) in FRAGMENT),
+            Texture(2 => (texture, Float { filterable: true }, D2) in FRAGMENT),
+        ]
+    }
+
+    fn create_gui_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
+        let gui_texture = util::view(&bindings.gui_texture.texture);
+        let (layout, bindings) = Self::gui_bindings(bindings, &gui_texture);
+        BindGroup::from_entries(&layout, &bindings, gpu)
+    }
+
+    fn update_gui_bind_group(gpu: &GpuContext, bindings: &Bindings, bind_group: &mut BindGroup) {
+        let gui_texture = util::view(&bindings.gui_texture.texture);
+        let (_layout, bindings) = Self::gui_bindings(bindings, &gui_texture);
+        bind_group.update_bindings(&bindings, gpu);
     }
 
     fn create_compute_pipeline(
@@ -706,6 +874,71 @@ impl Context {
         gpu: &GpuContext,
     ) -> anyhow::Result<wgpu::ComputePipeline> {
         Self::create_compute_pipeline(bind_group, "shaders/denoise.comp", gpu)
+    }
+
+    fn create_gui_pipeline(
+        bind_group: &BindGroup,
+        gpu: &GpuContext,
+    ) -> anyhow::Result<wgpu::RenderPipeline> {
+        let layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[&bind_group.layout],
+                push_constant_ranges: &[],
+            });
+
+        let vertex_module = shader::create_shader_module(gpu, "shaders/gui.vert")?;
+        let fragment_module = shader::create_shader_module(gpu, "shaders/gui.frag")?;
+
+        let vertex = wgpu::VertexState {
+            module: &vertex_module,
+            entry_point: "main",
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<GuiVertex>() as u64,
+                step_mode: wgpu::InputStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float2,
+                    1 => Float2,
+                    2 => Uint,
+                ],
+            }],
+        };
+
+        let fragment = wgpu::FragmentState {
+            module: &fragment_module,
+            entry_point: "main",
+            targets: &[wgpu::ColorTargetState {
+                format: Self::SWAP_CHAIN_FORMAT,
+                alpha_blend: wgpu::BlendState::REPLACE,
+                color_blend: wgpu::BlendState {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                write_mask: wgpu::ColorWrite::ALL,
+            }],
+        };
+
+        let pipeline = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: None,
+                layout: Some(&layout),
+                vertex,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: wgpu::CullMode::None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(fragment),
+            });
+
+        Ok(pipeline)
     }
 
     fn create_render_pipeline(
@@ -772,6 +1005,9 @@ impl Context {
         self.denoise_pipeline =
             Self::create_denoise_pipeline(&self.bind_groups.denoise, &self.gpu)?;
 
+        info!("recreating gui pipeline");
+        self.gui_pipeline = Self::create_gui_pipeline(&self.bind_groups.gui, &self.gpu)?;
+
         self.bindings.uniforms.still_sample = 0;
         Ok(())
     }
@@ -783,6 +1019,16 @@ impl Context {
         self.bindings.new_g_buffer = GBuffer::new(&self.gpu, self.output_size);
         self.bindings.denoised_color =
             GBuffer::create_storage_texture(new_size, GBuffer::COLOR_FORMAT, &self.gpu);
+
+        self.bindings.gui_uniforms.write(
+            &self.gpu,
+            0,
+            &[GuiUniforms {
+                width: new_size.width as f32,
+                height: new_size.height as f32,
+            }],
+        );
+
         self.bind_groups = Self::create_bind_groups(&self.gpu, &self.bindings);
         self.recreate_pipeline()
     }
@@ -819,11 +1065,10 @@ impl Context {
                     }
                 }
 
-                if let Some(fps) = self.fps_counter.tick() {
-                    self.window.set_title(&format!("voxels @ {:.1}", fps));
-                }
-
+                self.fps_counter.tick();
                 let dt = self.stopwatch.tick().as_secs_f32();
+
+                self.update_gui(dt);
                 self.update(dt);
                 pollster::block_on(self.render()).context("failed to render frame")?;
             }
@@ -834,25 +1079,60 @@ impl Context {
                 WindowEvent::Resized(new_size) => {
                     self.resize(new_size).context("failed to resize")?;
                 }
+                WindowEvent::ReceivedCharacter(ch) => {
+                    if !self.input.cursor_grabbed && !ch.is_control() {
+                        self.gui.events.push(egui::Event::Text(dbg!(ch).into()))
+                    }
+                }
                 WindowEvent::KeyboardInput { input, .. } => {
-                    use winit::event::ElementState::Pressed;
+                    use winit::event::{ElementState::Pressed, VirtualKeyCode};
+
+                    if let Some(key) = input.virtual_keycode {
+                        if !self.input.cursor_grabbed {
+                            let egui_key = match key {
+                                VirtualKeyCode::Return => Some(egui::Key::Enter),
+                                VirtualKeyCode::Back => Some(egui::Key::Backspace),
+                                VirtualKeyCode::Delete => Some(egui::Key::Delete),
+                                VirtualKeyCode::Left => Some(egui::Key::ArrowLeft),
+                                VirtualKeyCode::Right => Some(egui::Key::ArrowRight),
+                                VirtualKeyCode::Up => Some(egui::Key::ArrowUp),
+                                VirtualKeyCode::Down => Some(egui::Key::ArrowDown),
+                                VirtualKeyCode::Home => Some(egui::Key::Home),
+                                VirtualKeyCode::End => Some(egui::Key::End),
+                                VirtualKeyCode::Tab => Some(egui::Key::Tab),
+                                _ => None,
+                            };
+
+                            if let Some(key) = egui_key {
+                                self.gui.events.push(egui::Event::Key {
+                                    key,
+                                    pressed: matches!(input.state, Pressed),
+                                    modifiers: Self::egui_modifiers(self.input.modifiers),
+                                })
+                            }
+                        }
+                    }
 
                     if let Ok(key) = KeyCode::try_from(input.scancode) {
                         match input.state {
                             winit::event::ElementState::Pressed => {
-                                self.pressed_keys.insert(key);
+                                self.input.pressed_keys.insert(key);
                             }
                             winit::event::ElementState::Released => {
-                                self.pressed_keys.remove(&key);
+                                self.input.pressed_keys.remove(&key);
                             }
                         }
 
                         match key {
                             KeyCode::Escape => *flow = ControlFlow::Exit,
                             KeyCode::Tab if input.state == Pressed => {
-                                self.cursor_grabbed = !self.cursor_grabbed;
-                                if self.window.set_cursor_grab(self.cursor_grabbed).is_ok() {
-                                    self.window.set_cursor_visible(!self.cursor_grabbed);
+                                self.input.cursor_grabbed = !self.input.cursor_grabbed;
+                                if self
+                                    .window
+                                    .set_cursor_grab(self.input.cursor_grabbed)
+                                    .is_ok()
+                                {
+                                    self.window.set_cursor_visible(!self.input.cursor_grabbed);
                                 }
                             }
                             _ => {}
@@ -874,11 +1154,47 @@ impl Context {
                         }
                     }
                 }
+                WindowEvent::CursorMoved { position, .. } => {
+                    let logical = position.to_logical(self.window.scale_factor());
+                    self.input.mouse_position = logical;
+                    if !self.input.cursor_grabbed {
+                        self.gui.events.push(egui::Event::PointerMoved(
+                            [logical.x as f32, logical.y as f32].into(),
+                        ))
+                    }
+                }
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    self.input.modifiers = modifiers;
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let egui_button = match button {
+                        winit::event::MouseButton::Left => Some(egui::PointerButton::Primary),
+                        winit::event::MouseButton::Right => Some(egui::PointerButton::Secondary),
+                        winit::event::MouseButton::Middle => Some(egui::PointerButton::Middle),
+                        winit::event::MouseButton::Other(_) => None,
+                    };
+
+                    if let Some(button) = egui_button {
+                        let pos = [
+                            self.input.mouse_position.x as f32,
+                            self.input.mouse_position.y as f32,
+                        ];
+
+                        if !self.input.cursor_grabbed {
+                            self.gui.events.push(egui::Event::PointerButton {
+                                pos: pos.into(),
+                                button,
+                                pressed: matches!(state, winit::event::ElementState::Pressed),
+                                modifiers: Self::egui_modifiers(self.input.modifiers),
+                            })
+                        }
+                    }
+                }
                 _ => {}
             },
             Event::DeviceEvent { event, .. } => match event {
                 DeviceEvent::MouseMotion { delta: (dx, dy) } => {
-                    if self.cursor_grabbed {
+                    if self.input.cursor_grabbed {
                         self.yaw += 0.001 * dx as f32;
                         self.pitch -= 0.001 * dy as f32;
                         self.bindings.uniforms.still_sample = 0;
@@ -891,10 +1207,174 @@ impl Context {
 
         Ok(())
     }
+
+    fn egui_modifiers(modifiers: winit::event::ModifiersState) -> egui::Modifiers {
+        egui::Modifiers {
+            alt: modifiers.alt(),
+            ctrl: modifiers.ctrl(),
+            shift: modifiers.shift(),
+            mac_cmd: false,
+            command: modifiers.ctrl(),
+        }
+    }
 }
 
 // Rendering
 impl Context {
+    pub fn update_gui(&mut self, dt: f32) {
+        let screen_size = [
+            self.output_size.width as f32,
+            self.output_size.height as f32,
+        ];
+        let screen_rect = egui::Rect::from_min_size([0.0, 0.0].into(), screen_size.into());
+
+        let raw_input = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            pixels_per_point: Some(self.window.scale_factor() as f32),
+            time: None,
+            predicted_dt: dt,
+            modifiers: egui::Modifiers::default(),
+            events: std::mem::take(&mut self.gui.events),
+            ..Default::default()
+        };
+
+        self.gui.ctx.begin_frame(raw_input);
+        self.draw_ui();
+
+        let (_output, shapes) = self.gui.ctx.end_frame();
+        let gui_meshes = self.gui.ctx.tessellate(shapes);
+        self.build_gui_meshes(gui_meshes);
+        self.update_gui_textures();
+    }
+
+    fn draw_ui(&mut self) {
+        let style = self.gui.ctx.style();
+
+        let ctx = self.gui.ctx.clone();
+
+        egui::Window::new("debug")
+            .frame({
+                let mut frame = egui::Frame::window(&style).multiply_with_opacity(0.8);
+                frame.shadow = egui::epaint::Shadow::small();
+                frame
+            })
+            .collapsible(true)
+            .auto_sized()
+            .show(&ctx, |ui| {
+                ui.label(format!("fps: {}", self.fps_counter.fps));
+
+                ui.collapsing("light", |ui| {
+                    let uniforms = &mut self.bindings.uniforms;
+                    let slider = |ui: &mut egui::Ui, name, value, max| {
+                        ui.add(egui::Slider::new(value, 0.0..=max).text(name));
+                    };
+                    slider(ui, "emit strength", &mut uniforms.emit_strength, 40.0);
+                    ui.separator();
+                    slider(ui, "sun strength", &mut uniforms.sun_strength, 5.0);
+                    slider(ui, "sun size", &mut uniforms.sun_size, 1.0);
+                    ui.separator();
+
+                    let slider_angle = |ui: &mut egui::Ui, text, value: &mut f32, max: f32| {
+                        use std::f32::consts::TAU;
+                        *value = (*value + TAU) % TAU;
+                        let mut degrees = value.to_degrees();
+                        ui.add(
+                            egui::Slider::new(&mut degrees, 0.0..=max)
+                                .text(text)
+                                .suffix("°"),
+                        );
+                        *value = degrees.to_radians();
+                    };
+
+                    slider_angle(ui, "sun yaw", &mut uniforms.sun_yaw, 360.0);
+                    slider_angle(ui, "sun pitch", &mut uniforms.sun_pitch, 180.0);
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let mut hsva = egui::color::Hsva::from_rgb(uniforms.sky_color);
+                        egui::color_picker::color_edit_button_hsva(
+                            ui,
+                            &mut hsva,
+                            egui::color_picker::Alpha::Opaque,
+                        );
+                        uniforms.sky_color = hsva.to_rgb();
+                        ui.label("sky color");
+                    });
+                });
+            });
+    }
+
+    fn build_gui_meshes(&mut self, meshes: Vec<egui::ClippedMesh>) {
+        self.gui.meshes.clear();
+        self.gui.meshes.reserve(meshes.len());
+
+        for egui::ClippedMesh(_clip, mesh) in meshes {
+            let indices = Buffer::new(&self.gpu, wgpu::BufferUsage::INDEX, &mesh.indices);
+
+            let vertices = mesh
+                .vertices
+                .into_iter()
+                .map(|vertex| GuiVertex {
+                    position: vertex.pos.into(),
+                    tex_coord: vertex.uv.into(),
+                    color: vertex.color.to_array(),
+                })
+                .collect::<Vec<_>>();
+            let vertices = Buffer::new(&self.gpu, wgpu::BufferUsage::VERTEX, vertices.as_slice());
+
+            self.gui.meshes.push(GuiMesh { indices, vertices })
+        }
+    }
+
+    fn update_gui_textures(&mut self) {
+        let new = self.gui.ctx.texture();
+        match &mut self.bindings.gui_texture {
+            old if old.version == Some(new.version) => { /* up to date */ }
+            old if old.size.width == new.width as u32 && old.size.height == new.height as u32 => {
+                // upload new texture data
+                self.gpu.queue.write_texture(
+                    wgpu::TextureCopyView {
+                        texture: &old.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                    },
+                    &new.pixels,
+                    wgpu::TextureDataLayout {
+                        offset: 0,
+                        bytes_per_row: old.size.width,
+                        rows_per_image: old.size.height,
+                    },
+                    wgpu::Extent3d {
+                        width: old.size.width,
+                        height: old.size.height,
+                        depth: 1,
+                    },
+                );
+
+                old.version = Some(new.version);
+            }
+            old => {
+                let new_size = crate::Size::new(new.width as u32, new.height as u32);
+                // recreate texture with new size
+                let texture = util::create_texture_with_data(
+                    new_size,
+                    Gui::TEXTURE_FORMAT,
+                    wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::COPY_DST,
+                    &self.gpu,
+                    &new.pixels,
+                );
+
+                *old = GuiTexture {
+                    version: Some(new.version),
+                    size: new_size,
+                    texture,
+                };
+
+                Self::update_gui_bind_group(&self.gpu, &self.bindings, &mut self.bind_groups.gui);
+            }
+        }
+    }
+
     pub fn update(&mut self, dt: f32) {
         self.camera.direction = Vec3::new(
             self.yaw.sin() * self.pitch.cos(),
@@ -902,7 +1382,8 @@ impl Context {
             self.yaw.cos() * self.pitch.cos(),
         );
 
-        let pressed = |keys: &[KeyCode]| keys.iter().any(|key| self.pressed_keys.contains(key));
+        let pressed =
+            |keys: &[KeyCode]| keys.iter().any(|key| self.input.pressed_keys.contains(key));
 
         let [right, _, forward] = self.camera.axis();
         let mut movement = Vec3::zero();
@@ -989,10 +1470,42 @@ impl Context {
             rpass.draw(0..6, 0..1);
         }
 
+        self.render_gui(&mut encoder, &output.view);
+
         let command_buffer = encoder.finish();
         self.gpu.queue.submit(Some(command_buffer));
 
+        drop(output);
+
         Ok(())
+    }
+
+    fn render_gui<'a>(
+        &'a mut self,
+        encoder: &'a mut wgpu::CommandEncoder,
+        output: &wgpu::TextureView,
+    ) {
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
+                attachment: output,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: true,
+                },
+            }],
+            depth_stencil_attachment: None,
+        });
+
+        rpass.set_pipeline(&self.gui_pipeline);
+        rpass.set_bind_group(0, &self.bind_groups.gui.bindings, &[]);
+
+        for mesh in self.gui.meshes.iter() {
+            rpass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            rpass.set_vertex_buffer(0, mesh.vertices.slice(..));
+            rpass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
+        }
     }
 
     fn get_next_frame(&mut self) -> anyhow::Result<wgpu::SwapChainTexture> {
@@ -1002,10 +1515,7 @@ impl Context {
                     let _ = info_span!("swap chain outdated");
                     self.recreate_swap_chain();
                 }
-                Ok(wgpu::SwapChainFrame {
-                    suboptimal: true, ..
-                })
-                | Err(wgpu::SwapChainError::Lost) => {
+                Err(wgpu::SwapChainError::Lost) => {
                     let _ = info_span!("swap chain lost");
                     info!("recreating swap chain");
                     self.swap_chain = Self::create_swap_chain(&self.gpu, self.output_size);
@@ -1076,6 +1586,14 @@ impl BindGroup {
 
         BindGroup { layout, bindings }
     }
+
+    pub fn update_bindings(&mut self, new_bindings: &[wgpu::BindGroupEntry], gpu: &GpuContext) {
+        self.bindings = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: new_bindings,
+        });
+    }
 }
 
 impl DirectoryWatcher {
@@ -1132,7 +1650,12 @@ impl GBuffer {
 
     fn copy_from(&self, other: &GBuffer, encoder: &mut wgpu::CommandEncoder) {
         util::copy_entire_texture_to_texture(&other.color, &self.color, self.size, encoder);
-        util::copy_entire_texture_to_texture(&other.normal_depth, &self.normal_depth, self.size, encoder);
+        util::copy_entire_texture_to_texture(
+            &other.normal_depth,
+            &self.normal_depth,
+            self.size,
+            encoder,
+        );
         util::copy_entire_texture_to_texture(&other.normal, &self.normal, self.size, encoder);
     }
 }

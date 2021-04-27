@@ -46,6 +46,33 @@ pub(crate) fn create_texture(
     })
 }
 
+pub(crate) fn create_texture_with_data(
+    size: crate::Size,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsage,
+    gpu: &GpuContext,
+    data: &[u8],
+) -> wgpu::Texture {
+    use wgpu::util::DeviceExt;
+    gpu.device.create_texture_with_data(
+        &gpu.queue,
+        &wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: size.width,
+                height: size.height,
+                depth: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+        },
+        data,
+    )
+}
+
 pub fn view(texture: &wgpu::Texture) -> wgpu::TextureView {
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }

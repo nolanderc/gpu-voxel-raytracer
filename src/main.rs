@@ -29,11 +29,6 @@ fn main() -> anyhow::Result<()> {
         .expect("could not open window");
     let window = Arc::new(window);
     
-    window.set_cursor_visible(false);
-    if let Err(e) = window.set_cursor_grab(true) {
-        warn!("failed to grab mouse cursor: {}", e);
-    }
-
     let mut context = pollster::block_on(crate::context::Context::new(window))?;
     
     event_loop.run(move |event, _, flow| {
@@ -57,7 +52,8 @@ fn init_log_subscriber() {
         // if not specified otherwise, only display warnings
         .add_directive(tracing_subscriber::filter::LevelFilter::WARN.into())
         // print info from this executable
-        .add_directive("voxel=info".parse().unwrap());
+        .add_directive("voxel=info".parse().unwrap())
+        .add_directive("gfx_backend_vulkan=off".parse().unwrap());
 
     if let Ok(text) = std::env::var("RUST_LOG") {
         filter = filter.add_directive(text.parse().unwrap());

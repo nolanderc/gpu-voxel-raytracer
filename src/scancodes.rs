@@ -66,6 +66,8 @@ scancodes! {
         LeftControl = 29,
         LeftShift = 42,
         Escape = 58,
+        Back = 14,
+        Enter = 28,
     }
 }
 
