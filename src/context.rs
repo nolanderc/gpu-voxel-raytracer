@@ -15,6 +15,7 @@ use std::sync::Arc;
 use crate::scancodes::Scancode as KeyCode;
 
 use std::convert::TryFrom;
+use std::rc::Rc;
 
 pub(crate) struct Context {
     window: Arc<winit::window::Window>,
@@ -56,6 +57,25 @@ struct Gui {
     ctx: egui::CtxRef,
     events: Vec<egui::Event>,
     meshes: Vec<GuiMesh>,
+    vox_files: Vec<Rc<std::path::Path>>,
+    current_model: Model,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Model {
+    Default,
+    Vox(Rc<std::path::Path>),
+}
+
+impl std::fmt::Display for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Model::Default => write!(f, "default"),
+            Model::Vox(path) => {
+                write!(f, "{}", path.display())
+            }
+        }
+    }
 }
 
 struct GuiMesh {
@@ -74,12 +94,41 @@ struct GuiVertex {
 impl Gui {
     pub const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
-    pub fn new() -> Self {
-        Gui {
+    pub fn new() -> anyhow::Result<Self> {
+        let vox_files =
+            Self::list_vox_files("vox").context("failed to gather names of vox files")?;
+
+        let gui = Gui {
             ctx: egui::CtxRef::default(),
             events: Vec::new(),
             meshes: Vec::new(),
+            vox_files,
+            current_model: Model::Default,
+        };
+
+        Ok(gui)
+    }
+
+    fn list_vox_files(directory: &str) -> anyhow::Result<Vec<Rc<std::path::Path>>> {
+        let entries = std::fs::read_dir(directory)?;
+
+        let mut files = Vec::new();
+
+        for entry in entries {
+            let entry = entry.context("failed to read directory entry")?;
+            if entry
+                .file_type()
+                .context("could not get file type")?
+                .is_file()
+            {
+                let path = entry.path();
+                if matches!(path.extension(), Some(ext) if ext == "vox") {
+                    files.push(path.into());
+                }
+            }
         }
+
+        Ok(files)
     }
 }
 
@@ -107,10 +156,30 @@ struct Bindings {
     new_g_buffer: GBuffer,
 
     denoised_color: wgpu::Texture,
+    denoise_unifroms: DenoiseUniforms,
+    denoise_unifrom_buffer: Buffer<DenoiseUniforms>,
 
     gui_uniforms: Buffer<GuiUniforms>,
     gui_texture: GuiTexture,
     near_sampler: wgpu::Sampler,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct DenoiseUniforms {
+    radius: u32,
+    sigma_distance: f32,
+    sigma_range: f32,
+}
+
+impl Default for DenoiseUniforms {
+    fn default() -> Self {
+        DenoiseUniforms {
+            radius: 0,
+            sigma_distance: 2.0,
+            sigma_range: 1.5,
+        }
+    }
 }
 
 #[repr(C)]
@@ -206,8 +275,15 @@ struct Uniforms {
     sun_size: f32,
     sun_yaw: f32,
     sun_pitch: f32,
+    sun_color: Vec3A,
 
-    sky_color: [f32; 3],
+    sky_color: Vec3A,
+
+    specularity: f32,
+
+    sample_blending: f32,
+    maximum_blending: f32,
+    blending_distance_cutoff: f32,
 }
 
 impl Default for Uniforms {
@@ -229,9 +305,15 @@ impl Default for Uniforms {
             sun_strength: 1.0,
             sun_size: 0.05,
             sun_yaw: 1.32,
-            sun_pitch: 2.32,
+            sun_pitch: 1.0,
+            sun_color: [1.0; 3].into(),
 
-            sky_color: [0.5; 3],
+            sky_color: [0.45, 0.6, 0.65].into(),
+
+            specularity: 0.0,
+            sample_blending: 0.1,
+            maximum_blending: 0.98,
+            blending_distance_cutoff: 1e-2,
         }
     }
 }
@@ -352,7 +434,7 @@ impl Context {
             pitch: 0.0,
             yaw: 0.0,
 
-            gui: Gui::new(),
+            gui: Gui::new().context("failed to create GUI")?,
         })
     }
 
@@ -599,6 +681,19 @@ impl Context {
         octree
     }
 
+    fn recreate_octree(&mut self, voxels: Vec<([i16; 3], [u8; 4])>) -> anyhow::Result<()> {
+        use wgpu::BufferUsage as Usage;
+
+        let octree = Self::create_octree(voxels);
+        self.bindings.octree_buffer =
+            Buffer::new(&self.gpu, Usage::STORAGE | Usage::COPY_DST, &octree);
+        self.bind_groups = Self::create_bind_groups(&self.gpu, &self.bindings);
+        self.recreate_pipeline()
+            .context("failed to recreate pipeline")?;
+
+        Ok(())
+    }
+
     fn create_bindings(gpu: &GpuContext, output_size: crate::Size) -> anyhow::Result<Bindings> {
         use wgpu::BufferUsage as Usage;
 
@@ -619,6 +714,13 @@ impl Context {
 
         let denoised_color =
             GBuffer::create_storage_texture(output_size, GBuffer::COLOR_FORMAT, gpu);
+
+        let denoise_unifroms = DenoiseUniforms::default();
+        let denoise_unifrom_buffer = Buffer::new(
+            gpu,
+            Usage::UNIFORM | Usage::COPY_DST,
+            &[DenoiseUniforms::default()],
+        );
 
         let (blue_noise_size, blue_noise_pixels) =
             Self::load_blue_noise("resources/blue-noise-128.zip")
@@ -665,6 +767,8 @@ impl Context {
             near_sampler,
 
             denoised_color,
+            denoise_unifroms,
+            denoise_unifrom_buffer,
 
             gui_uniforms,
             gui_texture: GuiTexture::empty(gpu),
@@ -804,6 +908,7 @@ impl Context {
             UniformImage(1 => (&new_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(2 => (&new_normal_depth, ReadOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
             Uniform(3 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(4 => (&bindings.denoise_unifrom_buffer) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -1068,7 +1173,7 @@ impl Context {
                 self.fps_counter.tick();
                 let dt = self.stopwatch.tick().as_secs_f32();
 
-                self.update_gui(dt);
+                self.update_gui(dt)?;
                 self.update(dt);
                 pollster::block_on(self.render()).context("failed to render frame")?;
             }
@@ -1143,15 +1248,7 @@ impl Context {
                     info!(path = %path.display(), "loading vox file");
                     match crate::vox::load(&path) {
                         Err(e) => error!("failed to load vox: {:?}", e),
-                        Ok(vox) => {
-                            let octree = Self::create_octree(Self::voxels_from_vox(&vox));
-                            use wgpu::BufferUsage as Usage;
-                            self.bindings.octree_buffer =
-                                Buffer::new(&self.gpu, Usage::STORAGE | Usage::COPY_DST, &octree);
-                            self.bind_groups = Self::create_bind_groups(&self.gpu, &self.bindings);
-                            self.recreate_pipeline()
-                                .context("failed to recreate pipeline")?;
-                        }
+                        Ok(vox) => self.recreate_octree(Self::voxels_from_vox(&vox))?,
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
@@ -1221,7 +1318,7 @@ impl Context {
 
 // Rendering
 impl Context {
-    pub fn update_gui(&mut self, dt: f32) {
+    pub fn update_gui(&mut self, dt: f32) -> anyhow::Result<()> {
         let screen_size = [
             self.output_size.width as f32,
             self.output_size.height as f32,
@@ -1239,18 +1336,21 @@ impl Context {
         };
 
         self.gui.ctx.begin_frame(raw_input);
-        self.draw_ui();
+        self.draw_ui()?;
 
         let (_output, shapes) = self.gui.ctx.end_frame();
         let gui_meshes = self.gui.ctx.tessellate(shapes);
         self.build_gui_meshes(gui_meshes);
         self.update_gui_textures();
+
+        Ok(())
     }
 
-    fn draw_ui(&mut self) {
+    fn draw_ui(&mut self) -> anyhow::Result<()> {
         let style = self.gui.ctx.style();
-
         let ctx = self.gui.ctx.clone();
+
+        let mut model_changed = false;
 
         egui::Window::new("debug")
             .frame({
@@ -1259,49 +1359,174 @@ impl Context {
                 frame
             })
             .collapsible(true)
-            .auto_sized()
+            .resizable(true)
+            .fixed_pos([5.0, 5.0])
             .show(&ctx, |ui| {
                 ui.label(format!("fps: {}", self.fps_counter.fps));
 
-                ui.collapsing("light", |ui| {
+                ui.collapsing("scene", |ui| {
                     let uniforms = &mut self.bindings.uniforms;
-                    let slider = |ui: &mut egui::Ui, name, value, max| {
-                        ui.add(egui::Slider::new(value, 0.0..=max).text(name));
-                    };
-                    slider(ui, "emit strength", &mut uniforms.emit_strength, 40.0);
-                    ui.separator();
-                    slider(ui, "sun strength", &mut uniforms.sun_strength, 5.0);
-                    slider(ui, "sun size", &mut uniforms.sun_size, 1.0);
-                    ui.separator();
+                    ui.collapsing("lighting", |ui| {
+                        ui.collapsing("sun", |ui| {
+                            Self::color_picker_hue(ui, "sun color", &mut uniforms.sun_color);
+                            Self::slider(ui, "sun strength", &mut uniforms.sun_strength, 0.0..=5.0);
+                            Self::slider(ui, "sun size", &mut uniforms.sun_size, 0.0..=1.0);
 
-                    let slider_angle = |ui: &mut egui::Ui, text, value: &mut f32, max: f32| {
-                        use std::f32::consts::TAU;
-                        *value = (*value + TAU) % TAU;
-                        let mut degrees = value.to_degrees();
-                        ui.add(
-                            egui::Slider::new(&mut degrees, 0.0..=max)
-                                .text(text)
-                                .suffix("°"),
-                        );
-                        *value = degrees.to_radians();
-                    };
+                            ui.separator();
 
-                    slider_angle(ui, "sun yaw", &mut uniforms.sun_yaw, 360.0);
-                    slider_angle(ui, "sun pitch", &mut uniforms.sun_pitch, 180.0);
+                            Self::slider_angle(ui, "sun yaw", &mut uniforms.sun_yaw, 0.0..=360.0);
+                            Self::slider_angle(
+                                ui,
+                                "sun pitch",
+                                &mut uniforms.sun_pitch,
+                                -90.0..=90.0,
+                            );
+                        });
 
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        let mut hsva = egui::color::Hsva::from_rgb(uniforms.sky_color);
-                        egui::color_picker::color_edit_button_hsva(
+                        ui.collapsing("sky", |ui| {
+                            Self::color_picker_hue(ui, "sky color", &mut uniforms.sky_color);
+                        });
+
+                        ui.collapsing("emmision", |ui| {
+                            Self::slider(
+                                ui,
+                                "emit strength",
+                                &mut uniforms.emit_strength,
+                                0.0..=40.0,
+                            );
+                        });
+                    });
+
+                    ui.collapsing("materials", |ui| {
+                        Self::slider(ui, "specularity", &mut uniforms.specularity, 0.0..=1.0);
+                    });
+
+                    ui.collapsing("model", |ui| {
+                        let current = &mut self.gui.current_model;
+                        let vox_files = &self.gui.vox_files;
+
+                        egui::ComboBox::from_label("current")
+                            .selected_text(current.to_string())
+                            .show_ui(ui, |ui| {
+                                ui.allocate_at_least(
+                                    [100.0, 0.0].into(),
+                                    egui::Sense::click_and_drag(),
+                                );
+
+                                let default =
+                                    ui.selectable_value(current, Model::Default, "default");
+                                if default.clicked() {
+                                    model_changed = true;
+                                }
+
+                                for path in vox_files.iter() {
+                                    let model = Model::Vox(path.clone());
+                                    let name = match path.file_stem() {
+                                        Some(stem) => stem.to_string_lossy().to_string(),
+                                        None => path.display().to_string(),
+                                    };
+                                    if ui.selectable_value(current, model, name).clicked() {
+                                        model_changed = true;
+                                    }
+                                }
+                            });
+                    });
+                });
+
+                ui.collapsing("renderer", |ui| {
+                    ui.collapsing("temporal blending", |ui| {
+                        let uniforms = &mut self.bindings.uniforms;
+                        Self::slider(ui, "factor", &mut uniforms.sample_blending, 0.0..=1.0);
+                        Self::slider(ui, "maximum", &mut uniforms.maximum_blending, 0.0..=1.0);
+                        Self::slider_log(
                             ui,
-                            &mut hsva,
-                            egui::color_picker::Alpha::Opaque,
+                            "distance cutoff",
+                            &mut uniforms.blending_distance_cutoff,
+                            0.0..=1.0,
                         );
-                        uniforms.sky_color = hsva.to_rgb();
-                        ui.label("sky color");
+                    });
+
+                    ui.collapsing("denoiser", |ui| {
+                        let uniforms = &mut self.bindings.denoise_unifroms;
+                        Self::slider(ui, "radius", &mut uniforms.radius, 0..=8);
+                        Self::slider(
+                            ui,
+                            "sigma distance",
+                            &mut uniforms.sigma_distance,
+                            0.1..=5.0,
+                        );
+                        Self::slider(ui, "sigma range", &mut uniforms.sigma_range, 0.1..=5.0);
                     });
                 });
             });
+
+        if model_changed {
+            match &self.gui.current_model {
+                Model::Default => {
+                    self.recreate_octree(Self::create_voxels())?;
+                }
+                Model::Vox(path) => match crate::vox::load(path) {
+                    Err(e) => error!("failed to load vox: {:?}", e),
+                    Ok(vox) => {
+                        self.recreate_octree(Self::voxels_from_vox(&vox)).unwrap();
+                    }
+                },
+            }
+        }
+
+        Ok(())
+    }
+
+    fn slider<T>(ui: &mut egui::Ui, name: &str, value: &mut T, range: std::ops::RangeInclusive<T>)
+    where
+        T: egui::emath::Numeric,
+    {
+        ui.add(
+            egui::Slider::new(value, range)
+                .text(name)
+                .clamp_to_range(true),
+        );
+    }
+
+    fn slider_log<T>(
+        ui: &mut egui::Ui,
+        name: &str,
+        value: &mut T,
+        range: std::ops::RangeInclusive<T>,
+    ) where
+        T: egui::emath::Numeric,
+    {
+        ui.add(egui::Slider::new(value, range).text(name).logarithmic(true));
+    }
+
+    fn slider_angle(
+        ui: &mut egui::Ui,
+        name: &str,
+        value: &mut f32,
+        range: std::ops::RangeInclusive<f32>,
+    ) {
+        let mut degrees = value.to_degrees();
+        ui.add(
+            egui::Slider::new(&mut degrees, range)
+                .text(name)
+                .clamp_to_range(true)
+                .suffix("°"),
+        );
+
+        *value = degrees.to_radians();
+    }
+
+    fn color_picker_hue(ui: &mut egui::Ui, name: &str, color: &mut Vec3A) {
+        ui.horizontal(|ui| {
+            let mut hsva = egui::color::Hsva::from_rgb(color.vector.into());
+            egui::color_picker::color_edit_button_hsva(
+                ui,
+                &mut hsva,
+                egui::color_picker::Alpha::Opaque,
+            );
+            ui.label(name);
+            *color = hsva.to_rgb().into();
+        });
     }
 
     fn build_gui_meshes(&mut self, meshes: Vec<egui::ClippedMesh>) {
@@ -1558,6 +1783,10 @@ impl Context {
         self.bindings
             .uniform_buffer
             .write(&self.gpu, 0, &[self.bindings.uniforms]);
+
+        self.bindings
+            .denoise_unifrom_buffer
+            .write(&self.gpu, 0, &[self.bindings.denoise_unifroms]);
     }
 }
 
