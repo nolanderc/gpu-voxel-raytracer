@@ -26,6 +26,7 @@ pub(crate) struct Context {
 
     pipeline: wgpu::RenderPipeline,
     voxel_pipeline: wgpu::ComputePipeline,
+    temporal_pipeline: wgpu::ComputePipeline,
     denoise_pipeline: wgpu::ComputePipeline,
     gui_pipeline: wgpu::RenderPipeline,
 
@@ -155,13 +156,53 @@ struct Bindings {
     old_g_buffer: GBuffer,
     new_g_buffer: GBuffer,
 
+    sampled_color: wgpu::Texture,
+
+    temporal_uniforms: UniformBuffer<TemporalUniforms>,
+
     denoised_color: wgpu::Texture,
-    denoise_unifroms: DenoiseUniforms,
-    denoise_unifrom_buffer: Buffer<DenoiseUniforms>,
+    denoise_uniforms: UniformBuffer<DenoiseUniforms>,
 
     gui_uniforms: Buffer<GuiUniforms>,
     gui_texture: GuiTexture,
     near_sampler: wgpu::Sampler,
+}
+
+struct UniformBuffer<T> {
+    uniforms: T,
+    buffer: Buffer<T>,
+}
+
+impl<T> std::ops::Deref for UniformBuffer<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.uniforms
+    }
+}
+
+impl<T> std::ops::DerefMut for UniformBuffer<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.uniforms
+    }
+}
+
+impl<T: bytemuck::Pod> UniformBuffer<T> {
+    pub fn new(gpu: &GpuContext, uniforms: T) -> UniformBuffer<T> {
+        use wgpu::BufferUsage as Usage;
+        let buffer = Buffer::new(
+            gpu,
+            Usage::UNIFORM | Usage::COPY_DST,
+            std::slice::from_ref(&uniforms),
+        );
+
+        UniformBuffer { uniforms, buffer }
+    }
+
+    pub fn update(&self, gpu: &GpuContext) {
+        self.buffer
+            .write(gpu, 0, std::slice::from_ref(&self.uniforms));
+    }
 }
 
 #[repr(C)]
@@ -226,6 +267,7 @@ struct BindGroups {
     voxel: BindGroup,
     denoise: BindGroup,
     gui: BindGroup,
+    temporal: BindGroup,
 }
 
 struct BindGroup {
@@ -280,10 +322,6 @@ struct Uniforms {
     sky_color: Vec3A,
 
     specularity: f32,
-
-    sample_blending: f32,
-    maximum_blending: f32,
-    blending_distance_cutoff: f32,
 }
 
 impl Default for Uniforms {
@@ -311,6 +349,21 @@ impl Default for Uniforms {
             sky_color: [0.45, 0.6, 0.65].into(),
 
             specularity: 0.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct TemporalUniforms {
+    sample_blending: f32,
+    maximum_blending: f32,
+    blending_distance_cutoff: f32,
+}
+
+impl Default for TemporalUniforms {
+    fn default() -> Self {
+        TemporalUniforms {
             sample_blending: 0.1,
             maximum_blending: 0.98,
             blending_distance_cutoff: 1e-2,
@@ -392,6 +445,7 @@ impl Context {
 
         let pipeline = Self::create_render_pipeline(&bind_groups.render, &gpu)?;
         let voxel_pipeline = Self::create_voxel_pipeline(&bind_groups.voxel, &gpu)?;
+        let temporal_pipeline = Self::create_temporal_pipeline(&bind_groups.temporal, &gpu)?;
         let denoise_pipeline = Self::create_denoise_pipeline(&bind_groups.denoise, &gpu)?;
         let gui_pipeline = Self::create_gui_pipeline(&bind_groups.gui, &gpu)?;
 
@@ -415,6 +469,7 @@ impl Context {
 
             pipeline,
             voxel_pipeline,
+            temporal_pipeline,
             denoise_pipeline,
             gui_pipeline,
 
@@ -706,21 +761,21 @@ impl Context {
         let uniform_buffer = Buffer::new(gpu, Usage::UNIFORM | Usage::COPY_DST, &[uniforms]);
         let old_uniform_buffer = Buffer::new(gpu, Usage::UNIFORM | Usage::COPY_DST, &[uniforms]);
 
+        let temporal_uniforms = UniformBuffer::new(gpu, TemporalUniforms::default());
+
         let octree = Self::create_octree(Self::create_voxels());
         let octree_buffer = Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &octree);
 
         let old_g_buffer = GBuffer::new(gpu, output_size);
         let new_g_buffer = GBuffer::new(gpu, output_size);
 
+        let sampled_color =
+            GBuffer::create_storage_texture(output_size, GBuffer::COLOR_FORMAT, gpu);
+
         let denoised_color =
             GBuffer::create_storage_texture(output_size, GBuffer::COLOR_FORMAT, gpu);
 
-        let denoise_unifroms = DenoiseUniforms::default();
-        let denoise_unifrom_buffer = Buffer::new(
-            gpu,
-            Usage::UNIFORM | Usage::COPY_DST,
-            &[DenoiseUniforms::default()],
-        );
+        let denoise_uniforms = UniformBuffer::new(gpu, DenoiseUniforms::default());
 
         let (blue_noise_size, blue_noise_pixels) =
             Self::load_blue_noise("resources/blue-noise-128.zip")
@@ -766,9 +821,11 @@ impl Context {
 
             near_sampler,
 
+            temporal_uniforms,
+
+            sampled_color,
             denoised_color,
-            denoise_unifroms,
-            denoise_unifrom_buffer,
+            denoise_uniforms,
 
             gui_uniforms,
             gui_texture: GuiTexture::empty(gpu),
@@ -858,6 +915,7 @@ impl Context {
         BindGroups {
             render: Self::create_render_bind_group(gpu, bindings),
             voxel: Self::create_voxel_bind_group(gpu, bindings),
+            temporal: Self::create_temporal_bind_group(gpu, bindings),
             denoise: Self::create_denoise_bind_group(gpu, bindings),
             gui: Self::create_gui_bind_group(gpu, bindings),
         }
@@ -867,32 +925,51 @@ impl Context {
         let color = util::view(&bindings.denoised_color);
         let (layout, bindings) = bind_group![
             UniformImage(0 => (&color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in FRAGMENT),
-            // Uniform(0 => (bindings.uniform_buffer) in wgpu::ShaderStage::FRAGMENT),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
     }
 
     fn create_voxel_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
-        let old_images = &bindings.old_g_buffer;
-        let new_images = &bindings.new_g_buffer;
-
-        let old_color = util::view(&old_images.color);
-        let new_color = util::view(&new_images.color);
-
-        let old_normal_depth = util::view(&old_images.normal_depth);
-        let new_normal_depth = util::view(&new_images.normal_depth);
+        let sampled_color = util::view(&bindings.sampled_color);
+        let new_normal_depth = util::view(&bindings.new_g_buffer.normal_depth);
 
         let (layout, bindings) = bind_group![
-            Texture(0 => (&old_color, Float { filterable: true }, D2) in COMPUTE),
-            UniformImage(1 => (&new_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            Texture(2 => (&old_normal_depth, Float { filterable: true }, D2) in COMPUTE),
-            UniformImage(3 => (&new_normal_depth, WriteOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
-            Uniform(6 => (&bindings.uniform_buffer) in COMPUTE),
-            Uniform(7 => (&bindings.old_uniform_buffer) in COMPUTE),
-            Storage(8 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
-            Storage(9 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
-            Sampler(10 => (&bindings.near_sampler) in COMPUTE),
+            UniformImage(0 => (&sampled_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            UniformImage(1 => (&new_normal_depth, WriteOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
+            Uniform(2 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(3 => (&bindings.old_uniform_buffer) in COMPUTE),
+            Storage(4 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
+            Storage(5 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
+        ];
+
+        BindGroup::from_entries(&layout, &bindings, gpu)
+    }
+
+    fn create_temporal_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
+        let old_images = &bindings.old_g_buffer;
+        let old_color = util::view(&old_images.color);
+        let old_normal_depth = util::view(&old_images.normal_depth);
+
+        let new_images = &bindings.new_g_buffer;
+        let new_color = util::view(&new_images.color);
+        let new_normal_depth = util::view(&new_images.normal_depth);
+
+        let sampled_color = util::view(&bindings.sampled_color);
+
+        let (layout, bindings) = bind_group![
+            Sampler(0 => (&bindings.near_sampler) in COMPUTE),
+
+            Texture(1 => (&old_color, Float { filterable: true }, D2) in COMPUTE),
+            UniformImage(2 => (&sampled_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            UniformImage(3 => (&new_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+
+            Texture(4 => (&old_normal_depth, Float { filterable: true }, D2) in COMPUTE),
+            UniformImage(5 => (&new_normal_depth, ReadOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
+
+            Uniform(6 => (&bindings.temporal_uniforms.buffer) in COMPUTE),
+            Uniform(7 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(8 => (&bindings.old_uniform_buffer) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -908,7 +985,7 @@ impl Context {
             UniformImage(1 => (&new_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(2 => (&new_normal_depth, ReadOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
             Uniform(3 => (&bindings.uniform_buffer) in COMPUTE),
-            Uniform(4 => (&bindings.denoise_unifrom_buffer) in COMPUTE),
+            Uniform(4 => (&bindings.denoise_uniforms.buffer) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -972,6 +1049,13 @@ impl Context {
         gpu: &GpuContext,
     ) -> anyhow::Result<wgpu::ComputePipeline> {
         Self::create_compute_pipeline(bind_group, "shaders/voxels.comp", gpu)
+    }
+
+    fn create_temporal_pipeline(
+        bind_group: &BindGroup,
+        gpu: &GpuContext,
+    ) -> anyhow::Result<wgpu::ComputePipeline> {
+        Self::create_compute_pipeline(bind_group, "shaders/temporal.comp", gpu)
     }
 
     fn create_denoise_pipeline(
@@ -1106,6 +1190,9 @@ impl Context {
         info!("recreating voxel pipeline");
         self.voxel_pipeline = Self::create_voxel_pipeline(&self.bind_groups.voxel, &self.gpu)?;
 
+        info!("recreating temporal pipeline");
+        self.temporal_pipeline = Self::create_temporal_pipeline(&self.bind_groups.temporal, &self.gpu)?;
+
         info!("recreating denoise pipeline");
         self.denoise_pipeline =
             Self::create_denoise_pipeline(&self.bind_groups.denoise, &self.gpu)?;
@@ -1114,14 +1201,25 @@ impl Context {
         self.gui_pipeline = Self::create_gui_pipeline(&self.bind_groups.gui, &self.gpu)?;
 
         self.bindings.uniforms.still_sample = 0;
+
         Ok(())
     }
 
     fn resize(&mut self, new_size: crate::Size) -> anyhow::Result<()> {
+        if self.output_size == new_size {
+            return Ok(());
+        }
+
+        info!(?new_size, "window was resized");
         self.output_size = new_size;
+
         self.recreate_swap_chain();
+
         self.bindings.old_g_buffer = GBuffer::new(&self.gpu, self.output_size);
         self.bindings.new_g_buffer = GBuffer::new(&self.gpu, self.output_size);
+
+        self.bindings.sampled_color =
+            GBuffer::create_storage_texture(new_size, GBuffer::COLOR_FORMAT, &self.gpu);
         self.bindings.denoised_color =
             GBuffer::create_storage_texture(new_size, GBuffer::COLOR_FORMAT, &self.gpu);
 
@@ -1435,7 +1533,7 @@ impl Context {
 
                 ui.collapsing("renderer", |ui| {
                     ui.collapsing("temporal blending", |ui| {
-                        let uniforms = &mut self.bindings.uniforms;
+                        let uniforms = &mut self.bindings.temporal_uniforms;
                         Self::slider(ui, "factor", &mut uniforms.sample_blending, 0.0..=1.0);
                         Self::slider(ui, "maximum", &mut uniforms.maximum_blending, 0.0..=1.0);
                         Self::slider_log(
@@ -1447,7 +1545,7 @@ impl Context {
                     });
 
                     ui.collapsing("denoiser", |ui| {
-                        let uniforms = &mut self.bindings.denoise_unifroms;
+                        let uniforms = &mut self.bindings.denoise_uniforms;
                         Self::slider(ui, "radius", &mut uniforms.radius, 0..=8);
                         Self::slider(
                             ui,
@@ -1658,18 +1756,23 @@ impl Context {
             let mut cpass =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
 
-            let local_x = 8;
-            let local_y = 8;
-            let groups_x = (self.output_size.width + local_x - 1) / local_x;
-            let groups_y = (self.output_size.height + local_y - 1) / local_y;
+            let dispatch_screen = |cpass: &mut wgpu::ComputePass, local_x, local_y| {
+                let groups_x = (self.output_size.width + local_x - 1) / local_x;
+                let groups_y = (self.output_size.height + local_y - 1) / local_y;
+                cpass.dispatch(groups_x, groups_y, 1);
+            };
 
             cpass.set_pipeline(&self.voxel_pipeline);
             cpass.set_bind_group(0, &self.bind_groups.voxel.bindings, &[]);
-            cpass.dispatch(groups_x, groups_y, 1);
+            dispatch_screen(&mut cpass, 8, 8);
+
+            cpass.set_pipeline(&self.temporal_pipeline);
+            cpass.set_bind_group(0, &self.bind_groups.temporal.bindings, &[]);
+            dispatch_screen(&mut cpass, 16, 16);
 
             cpass.set_pipeline(&self.denoise_pipeline);
             cpass.set_bind_group(0, &self.bind_groups.denoise.bindings, &[]);
-            cpass.dispatch(groups_x, groups_y, 1);
+            dispatch_screen(&mut cpass, 16, 16);
         }
 
         self.bindings
@@ -1784,9 +1887,8 @@ impl Context {
             .uniform_buffer
             .write(&self.gpu, 0, &[self.bindings.uniforms]);
 
-        self.bindings
-            .denoise_unifrom_buffer
-            .write(&self.gpu, 0, &[self.bindings.denoise_unifroms]);
+        self.bindings.temporal_uniforms.update(&self.gpu);
+        self.bindings.denoise_uniforms.update(&self.gpu);
     }
 }
 
