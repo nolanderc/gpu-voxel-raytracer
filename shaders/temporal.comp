@@ -119,8 +119,6 @@ void main() {
     }
 
     vec3 blended_color = depth >= 0 ? mix(old_color.rgb, color, blending) : color;
-    blended_color = clamp(blended_color, 0, 1);
-
     float next_blending = clamp((1 - sample_blending) * blending, 1 - maximum_blending, 1);
 
     imageStore(new_color, coord, vec4(blended_color, next_blending));

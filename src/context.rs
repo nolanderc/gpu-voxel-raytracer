@@ -129,6 +129,8 @@ impl Gui {
             }
         }
 
+        files.sort();
+
         Ok(files)
     }
 }
@@ -166,6 +168,7 @@ struct Bindings {
     gui_uniforms: Buffer<GuiUniforms>,
     gui_texture: GuiTexture,
     near_sampler: wgpu::Sampler,
+    albedo: wgpu::Texture,
 }
 
 struct UniformBuffer<T> {
@@ -211,6 +214,7 @@ struct DenoiseUniforms {
     radius: u32,
     sigma_distance: f32,
     sigma_range: f32,
+    albedo_factor: f32,
 }
 
 impl Default for DenoiseUniforms {
@@ -219,6 +223,7 @@ impl Default for DenoiseUniforms {
             radius: 0,
             sigma_distance: 2.0,
             sigma_range: 1.5,
+            albedo_factor: 1.0,
         }
     }
 }
@@ -769,11 +774,12 @@ impl Context {
         let old_g_buffer = GBuffer::new(gpu, output_size);
         let new_g_buffer = GBuffer::new(gpu, output_size);
 
-        let sampled_color =
-            GBuffer::create_storage_texture(output_size, GBuffer::COLOR_FORMAT, gpu);
+        let create_color_texture =
+            || GBuffer::create_storage_texture(output_size, GBuffer::COLOR_FORMAT, gpu);
 
-        let denoised_color =
-            GBuffer::create_storage_texture(output_size, GBuffer::COLOR_FORMAT, gpu);
+        let sampled_color = create_color_texture();
+        let albedo = create_color_texture();
+        let denoised_color = create_color_texture();
 
         let denoise_uniforms = UniformBuffer::new(gpu, DenoiseUniforms::default());
 
@@ -823,8 +829,10 @@ impl Context {
 
             temporal_uniforms,
 
+            albedo,
             sampled_color,
             denoised_color,
+
             denoise_uniforms,
 
             gui_uniforms,
@@ -932,15 +940,17 @@ impl Context {
 
     fn create_voxel_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
         let sampled_color = util::view(&bindings.sampled_color);
+        let albedo = util::view(&bindings.albedo);
         let new_normal_depth = util::view(&bindings.new_g_buffer.normal_depth);
 
         let (layout, bindings) = bind_group![
             UniformImage(0 => (&sampled_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(1 => (&new_normal_depth, WriteOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
-            Uniform(2 => (&bindings.uniform_buffer) in COMPUTE),
-            Uniform(3 => (&bindings.old_uniform_buffer) in COMPUTE),
-            Storage(4 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
-            Storage(5 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
+            UniformImage(2 => (&albedo, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            Uniform(3 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(4 => (&bindings.old_uniform_buffer) in COMPUTE),
+            Storage(5 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
+            Storage(6 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -979,13 +989,15 @@ impl Context {
         let denoise_color = util::view(&bindings.denoised_color);
         let new_color = util::view(&bindings.new_g_buffer.color);
         let new_normal_depth = util::view(&bindings.new_g_buffer.normal_depth);
+        let albedo = util::view(&bindings.albedo);
 
         let (layout, bindings) = bind_group![
             UniformImage(0 => (&denoise_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(1 => (&new_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(2 => (&new_normal_depth, ReadOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
-            Uniform(3 => (&bindings.uniform_buffer) in COMPUTE),
-            Uniform(4 => (&bindings.denoise_uniforms.buffer) in COMPUTE),
+            UniformImage(3 => (&albedo, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            Uniform(4 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(5 => (&bindings.denoise_uniforms.buffer) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -1191,7 +1203,8 @@ impl Context {
         self.voxel_pipeline = Self::create_voxel_pipeline(&self.bind_groups.voxel, &self.gpu)?;
 
         info!("recreating temporal pipeline");
-        self.temporal_pipeline = Self::create_temporal_pipeline(&self.bind_groups.temporal, &self.gpu)?;
+        self.temporal_pipeline =
+            Self::create_temporal_pipeline(&self.bind_groups.temporal, &self.gpu)?;
 
         info!("recreating denoise pipeline");
         self.denoise_pipeline =
@@ -1218,10 +1231,12 @@ impl Context {
         self.bindings.old_g_buffer = GBuffer::new(&self.gpu, self.output_size);
         self.bindings.new_g_buffer = GBuffer::new(&self.gpu, self.output_size);
 
-        self.bindings.sampled_color =
-            GBuffer::create_storage_texture(new_size, GBuffer::COLOR_FORMAT, &self.gpu);
-        self.bindings.denoised_color =
-            GBuffer::create_storage_texture(new_size, GBuffer::COLOR_FORMAT, &self.gpu);
+        let create_color_texture =
+            |gpu| GBuffer::create_storage_texture(new_size, GBuffer::COLOR_FORMAT, gpu);
+
+        self.bindings.sampled_color = create_color_texture(&self.gpu);
+        self.bindings.albedo = create_color_texture(&self.gpu);
+        self.bindings.denoised_color = create_color_texture(&self.gpu);
 
         self.bindings.gui_uniforms.write(
             &self.gpu,
@@ -1467,7 +1482,12 @@ impl Context {
                     ui.collapsing("lighting", |ui| {
                         ui.collapsing("sun", |ui| {
                             Self::color_picker_hue(ui, "sun color", &mut uniforms.sun_color);
-                            Self::slider(ui, "sun strength", &mut uniforms.sun_strength, 0.0..=5.0);
+                            Self::slider(
+                                ui,
+                                "sun strength",
+                                &mut uniforms.sun_strength,
+                                0.0..=10.0,
+                            );
                             Self::slider(ui, "sun size", &mut uniforms.sun_size, 0.0..=1.0);
 
                             ui.separator();
@@ -1555,6 +1575,15 @@ impl Context {
                         );
                         Self::slider(ui, "sigma range", &mut uniforms.sigma_range, 0.1..=5.0);
                     });
+
+                    ui.collapsing("composition", |ui| {
+                        Self::slider(
+                            ui,
+                            "albedo",
+                            &mut self.bindings.denoise_uniforms.albedo_factor,
+                            0.0..=1.0,
+                        );
+                    })
                 });
             });
 

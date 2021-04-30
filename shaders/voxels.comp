@@ -22,7 +22,11 @@ layout(rgba32f, binding = 0) uniform writeonly image2D output_color;
 // W: depth of the first surface hit
 layout(rgba32f, binding = 1) uniform writeonly image2D new_normals_depths;
 
-layout(binding = 2) uniform uniforms {
+// RGB: color of the first surface hit
+layout(rgba32f, binding = 2) uniform writeonly image2D albedo;
+
+
+layout(binding = 3) uniform uniforms {
     vec4 camera_origin;
     vec4 camera_right;
     vec4 camera_up;
@@ -45,14 +49,14 @@ layout(binding = 2) uniform uniforms {
     float specularity;
 };
 
-layout(binding = 3) uniform old_uniforms {
+layout(binding = 4) uniform old_uniforms {
     vec4 old_camera_origin;
     vec4 old_camera_right;
     vec4 old_camera_up;
     vec4 old_camera_forward;
 };
 
-layout(binding = 4) readonly buffer octree_data {
+layout(binding = 5) readonly buffer octree_data {
     vec3 root_center;
     float root_size;
     float child_size;
@@ -63,7 +67,7 @@ layout(binding = 4) readonly buffer octree_data {
 #define BLUE_NOISE_COUNT 512
 #define BLUE_NOISE_BUFFER_SIZE (BLUE_NOISE_SIZE * BLUE_NOISE_SIZE * BLUE_NOISE_COUNT)
 
-layout(binding = 5) readonly buffer randomness {
+layout(binding = 6) readonly buffer randomness {
     float blue_noise[BLUE_NOISE_BUFFER_SIZE];
 };
 
@@ -288,12 +292,9 @@ void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
 
     vec3 out_color = vec3(0);
-    vec3 albedo = vec3(0);
-    vec3 world_pos = vec3(ALMOST_INFINITY);
     vec3 first_normal = vec3(ALMOST_INFINITY);
     float first_time = -1;
-    bool hit = false;
-    int first_node = 0;
+    int first_node = 0xffffff;
 
     vec3 sun_dir = vec3(cos(sun_yaw) * cos(sun_pitch), -sin(sun_pitch), sin(sun_yaw) * cos(sun_pitch));
 
@@ -315,15 +316,14 @@ void main() {
             vec3 normal;
             if (cast_ray(ray_origin, ray_dir, time, node, normal)) {
                 vec3 hit_pos = ray_origin + ray_dir * time;
-                vec3 color = node_color(node);
+
+                // we handle the first bounce's color seperately as albedo
+                vec3 color = bounce == 0 ? vec3(1) : node_color(node);
                 vec3 emmitance = node_emmitance(node);
 
-                if (!hit) {
+                if (bounce == 0) {
                     first_node = node;
-                    albedo = color;
-                    world_pos = hit_pos;
                     first_normal = normal;
-                    hit = true;
                     first_time = time;
                 }
 
@@ -345,6 +345,7 @@ void main() {
                     sun_time, sun_node, sun_normal
                 );
 
+                ambient_rays++;
                 if (!sun_obstructed) {
                     sample_color += SUN_COLOR * color * blending_factor * mix(1, 0, specularity) * max(0, dot(normal, normalize(-light_dir)));
                 }
@@ -356,7 +357,6 @@ void main() {
 
                 sample_color += emmitance * blending_factor;
                 blending_factor *= color * mix(2, 1, specularity) * dot(normal, reflect_dir);
-                //blending_factor *= color;
 
                 ray_origin = hit_pos + 1e-5 * normal;
                 ray_dir = reflect_dir;
@@ -373,16 +373,19 @@ void main() {
                     max(0, dot(ray_dir, normalize(-sun_dir))), 
                     1.0 / pow(sun_size, 2)
                 );
-                sample_color += (sky_color.rgb + SUN_COLOR * sun_power) * blending_factor / ambient_rays;
+                sample_color += (sky_color.rgb + SUN_COLOR * sun_power) * blending_factor;
                 // break;
             }
         }
 
-        out_color += sample_color;
+        out_color += sample_color / ambient_rays;
     }
 
     out_color /= MAX_SAMPLES;
 
+    vec3 albedo_color = (first_node & EMMITANCE_BIT) == 0 ? node_color(first_node) : vec3(1);
+
     imageStore(output_color, coord, vec4(out_color, 1));
     imageStore(new_normals_depths, coord, vec4(first_normal, first_time));
+    imageStore(albedo, coord, vec4(albedo_color, intBitsToFloat(first_node)));
 }

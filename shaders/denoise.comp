@@ -5,18 +5,20 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(rgba32f, binding = 0) uniform writeonly image2D output_colors;
 layout(rgba32f, binding = 1) uniform readonly image2D colors;
 layout(rgba32f, binding = 2) uniform readonly image2D normals_depths;
+layout(rgba32f, binding = 3) uniform readonly image2D albedo;
 
-layout(binding = 3) uniform uniforms {
+layout(binding = 4) uniform uniforms {
     vec4 camera_origin;
     vec4 camera_right;
     vec4 camera_up;
     vec4 camera_forward;
 };
 
-layout(binding = 4) uniform denoise_uniforms {
+layout(binding = 5) uniform denoise_uniforms {
     uint radius;
     float sigma_distance;
     float sigma_range;
+    float albedo_factor;
 };
 
 void main() {
@@ -39,6 +41,8 @@ void main() {
 
     vec4 center_color = imageLoad(colors, coord);
     vec4 center_normal_depth = imageLoad(normals_depths, coord);
+    vec3 center_albedo = imageLoad(albedo, coord).rgb;
+    int center_material = floatBitsToInt(imageLoad(albedo, coord).w);
 
     float depth_bias = max(0, dot(center_normal_depth.xyz, -ray_dir));
 
@@ -51,17 +55,26 @@ void main() {
             int ny = coord.y + dy;
 
             if (0 <= nx && nx < size.x && 0 <= ny && ny < size.y) {
-                vec4 window_color = imageLoad(colors, ivec2(nx, ny));
-                vec4 window_normal_depth = imageLoad(normals_depths, ivec2(nx, ny));
+                ivec2 window = ivec2(nx, ny);
+
+                vec4 window_color = imageLoad(colors, window);
+                vec4 window_normal_depth = imageLoad(normals_depths, window);
+                int window_material = floatBitsToInt(imageLoad(albedo, window).w);
 
                 vec3 color_delta = center_color.rgb - window_color.rgb;
                 vec3 normal_delta = center_normal_depth.xyz - window_normal_depth.xyz;
                 float depth_delta = log(abs(center_normal_depth.w)) - log(abs(window_normal_depth.w));
+                float material_delta = (center_material >> 24) != (window_material >> 24) ? 1 : 0;
 
                 float factor_range = (
+                        // don't blend too different colors
                         dot(color_delta, color_delta)
-                        + 5 * dot(normal_delta, normal_delta)
-                        + 1e4 * pow(depth_bias, 2) * pow(depth_delta, 2)
+                        // don't blend over edges
+                        + 1e4 * dot(normal_delta, normal_delta)
+                        // don't blend over great distances
+                        + 1e4 * pow(depth_bias * depth_delta, 2)
+                        // don't blend between materials
+                        + 1e4 * material_delta
                     ) / sigma_range_2;
                 float factor_distance = (dx*dx + dy*dy) / sigma_distance_2;
                 float factor = exp(-factor_range - factor_distance);
@@ -73,5 +86,5 @@ void main() {
     }
 
     vec3 out_color = radius == 0 ? center_color.rgb : sum / normalization;
-    imageStore(output_colors, coord, vec4(out_color, 1));
+    imageStore(output_colors, coord, vec4(mix(out_color, center_albedo * out_color, albedo_factor), 1));
 }
