@@ -444,7 +444,7 @@ impl Context {
 
         let output_size = window.inner_size();
         let swap_chain = Self::create_swap_chain(&gpu, output_size);
-        let bindings = Self::create_bindings(&gpu, output_size)?;
+        let bindings = Self::create_bindings(&gpu, output_size, window.scale_factor() as f32)?;
 
         let bind_groups = Self::create_bind_groups(&gpu, &bindings);
 
@@ -754,7 +754,11 @@ impl Context {
         Ok(())
     }
 
-    fn create_bindings(gpu: &GpuContext, output_size: crate::Size) -> anyhow::Result<Bindings> {
+    fn create_bindings(
+        gpu: &GpuContext,
+        output_size: crate::Size,
+        scale_factor: f32,
+    ) -> anyhow::Result<Bindings> {
         use wgpu::BufferUsage as Usage;
 
         let mut uniforms = Uniforms::default();
@@ -799,8 +803,8 @@ impl Context {
             gpu,
             Usage::UNIFORM | Usage::COPY_DST,
             &[GuiUniforms {
-                width: output_size.width as f32,
-                height: output_size.height as f32,
+                width: output_size.width as f32 / scale_factor,
+                height: output_size.height as f32 / scale_factor,
             }],
         );
 
@@ -1242,8 +1246,8 @@ impl Context {
             &self.gpu,
             0,
             &[GuiUniforms {
-                width: new_size.width as f32,
-                height: new_size.height as f32,
+                width: new_size.width as f32 / self.window.scale_factor() as f32,
+                height: new_size.height as f32 / self.window.scale_factor() as f32,
             }],
         );
 
@@ -1299,7 +1303,7 @@ impl Context {
                 }
                 WindowEvent::ReceivedCharacter(ch) => {
                     if !self.input.cursor_grabbed && !ch.is_control() {
-                        self.gui.events.push(egui::Event::Text(dbg!(ch).into()))
+                        self.gui.events.push(egui::Event::Text(ch.into()))
                     }
                 }
                 WindowEvent::KeyboardInput { input, .. } => {
@@ -1793,7 +1797,7 @@ impl Context {
 
             cpass.set_pipeline(&self.voxel_pipeline);
             cpass.set_bind_group(0, &self.bind_groups.voxel.bindings, &[]);
-            dispatch_screen(&mut cpass, 8, 8);
+            dispatch_screen(&mut cpass, 16, 16);
 
             cpass.set_pipeline(&self.temporal_pipeline);
             cpass.set_bind_group(0, &self.bind_groups.temporal.bindings, &[]);

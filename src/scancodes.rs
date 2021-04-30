@@ -71,3 +71,60 @@ scancodes! {
     }
 }
 
+#[cfg(target_os = "macos")]
+scancodes! {
+    pub enum Scancode {
+        Q = 12,
+        W = 13,
+        E = 14,
+        R = 15,
+        T = 17,
+        Y = 16,
+        U = 32,
+        I = 34,
+        O = 31,
+        P = 35,
+
+        A = 0,
+        S = 1,
+        D = 2,
+        F = 3,
+        G = 5,
+        H = 4,
+        J = 38,
+        K = 40,
+        L = 37,
+
+        Z = 6,
+        X = 7,
+        C = 8,
+        V = 9,
+        B = 11,
+        N = 45,
+        M = 46,
+
+        Tab = 48,
+        Escape = 53,
+        LeftShift = 56,
+        LeftControl = 59,
+        Space = 49,
+        Return = 36,
+        Back = 51,
+
+        Left = 123,
+        Right = 124,
+        Up = 126,
+        Down = 125,
+
+        Key1 = 18,
+        Key2 = 19,
+        Key3 = 20,
+        Key4 = 21,
+        Key5 = 23,
+        Key6 = 22,
+        Key7 = 26,
+        Key8 = 28,
+        Key9 = 25,
+        Key0 = 29,
+    }
+}
