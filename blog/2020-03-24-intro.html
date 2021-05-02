@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Christofer Nolander" />
+  <meta name="dcterms.date" content="2020-03-24" />
+  <title>Realtime Path Tracing on the GPU</title>
+  <style>
+    html {
+      line-height: 1.5;
+      font-family: Georgia, serif;
+      font-size: 20px;
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      word-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 1em;
+      }
+    }
+    @media print {
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, 'Lucida Console', Consolas, monospace;
+      font-size: 85%;
+      margin: 0;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      background-color: #1a1a1a;
+      border: none;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    span.underline{text-decoration: underline;}
+    div.column{display: inline-block; vertical-align: top; width: 50%;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    ul.task-list{list-style: none;}
+  </style>
+  <!--[if lt IE 9]>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/html5shiv/3.7.3/html5shiv-printshiv.min.js"></script>
+  <![endif]-->
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Realtime Path Tracing on the GPU</h1>
+<p class="subtitle">Introduction to The Problem</p>
+<p class="author">Christofer Nolander</p>
+<p class="date">2020-03-24</p>
+</header>
+<p>Ray Tracing is all the rage in graphics development nowadays. With the rise of graphics cards with native hardware support for ray tracing it has finally entered mainstream games. In this series of blogs I will explore the possibilities of ray tracing on the GPU. Specifically, I will be developing something very similar to ray tracing, but with minor differences, called <em>path tracing</em>.</p>
+<h1 id="what-is-path-tracing">What is Path Tracing?</h1>
+<p>Pathtracing is the process of simulating rays of light exiting a camera into a scene, which then bounce around, gather light information, and produces pretty pictures like the one below.</p>
+<figure>
+<img src="resources/ray-casting.png" alt="Rays casted for each pixel contribute to that pixel’s color" /><figcaption aria-hidden="true">Rays casted for each pixel contribute to that pixel’s color</figcaption>
+</figure>
+<p>Path tracing’s main difference to ray tracing is that in ray tracing, is that in path tracing, rays bounce around randomly after hitting a surface. Unlike ray tracing, where rays follow a fixed trajectroy in a predetermined direction (could be out of the camera in a specific direction, or towards a light source after a surface has been hit).</p>
+<p>This makes path tracing more akin to real-life, where light bounces in almost every direction, which also results in it producing more realistic images, such as this one:</p>
+<figure>
+<img src="resources/path-tracing.png" alt="Example of an image produced with tracing (from Wikipedia)" /><figcaption aria-hidden="true">Example of an image produced with tracing (from Wikipedia)</figcaption>
+</figure>
+<h1 id="the-problem-with-path-tracing">The Problem with Path Tracing</h1>
+<p>Although, there’s one downside: noise. Since the rays bounce randomly, we have no guarantee that rays actually hit any of the light source in the scene: some might, but some might not. Because of this, some pixel might be very bright, and other very dark, resulting in a noisy image.</p>
+<p>The simplest way to reduce noise in an image is to trace multiple rays. This increases the likelyhood that a given ray hits a lightsource, if there is one. The final color of a pixel can then be given by the average of all rays’ light. Each one of these rays is commonly called a <em>sample</em>, and the process of tracing all the rays <em>sampling</em>.</p>
+<p>Therefore, in order to get a nice picture in the end, we need as many samples as possible. However, as this process is quite computationally expensive, it is very time-consuming and thus hard to do in real-time.</p>
+<h1 id="path-tracing-in-real-time">Path Tracing in Real-Time</h1>
+<p>One solution to this problem is simply to make the process of tracing one ray in the scene as inexpensive and fast as possible. The former can be done by utilizing clever data structures in order to reduce the number of objects in the scene that need to be checked for intersections with a ray. The latter can be done by exploiting that path tracing is embarrasingly parellelizable (all rays are independent of each other), and therefore can easily be offloaded to the GPU.</p>
+<p>In the next post we will look at how a certain data structure called an <em>octree</em> will help us speed lower the cost of each ray. And in the posts after that, we will begin implementing the path-tracer on the GPU.</p>
+<p><a href="2020-03-25-octree.html" style="float:right;">Next Post</a></p>
+</body>
+</html>
