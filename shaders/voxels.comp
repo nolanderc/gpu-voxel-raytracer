@@ -1,7 +1,7 @@
 #version 450
 
 #define MAX_DEPTH 16
-#define MAX_BOUNCES 3
+#define MAX_BOUNCES 4
 #define MAX_SAMPLES 1
 
 #define SUN_COLOR (sun_strength * sun_color.rgb)
@@ -327,40 +327,52 @@ void main() {
                     first_time = time;
                 }
 
-                // === Cast sun ray ===
-                vec3 rand_dir = vec3(rand(), rand(), rand());
-                vec3 up_dir = normalize(cross(rand_dir, sun_dir));
-                vec3 right_dir = normalize(cross(sun_dir, up_dir));
+                if (rand() < specularity) {
+                    // specular
+                    vec3 reflect_dir = normalize(reflect(ray_dir, normal));
 
-                float dx = 2 * rand() - 1;
-                float dy = 2 * rand() - 1;
+                    sample_color += emmitance * blending_factor;
+                    blending_factor *= 2 * color * dot(reflect_dir, normal);
 
-                vec3 light_dir = normalize(sun_dir) + (dx * right_dir + dy * up_dir) * sun_size;
+                    ray_origin = hit_pos + 1e-5 * normal;
+                    ray_dir = reflect_dir;
+                } else {
+                    // diffuse
 
-                float sun_time;
-                int sun_node;
-                vec3 sun_normal;
-                bool sun_obstructed = cast_ray(
-                    hit_pos + 1e-5 * normal, normalize(-light_dir),
-                    sun_time, sun_node, sun_normal
-                );
+                    // === Cast sun ray ===
+                    vec3 rand_dir = vec3(rand(), rand(), rand());
+                    vec3 up_dir = normalize(cross(rand_dir, sun_dir));
+                    vec3 right_dir = normalize(cross(sun_dir, up_dir));
 
-                ambient_rays++;
-                if (!sun_obstructed) {
-                    sample_color += SUN_COLOR * color * blending_factor * mix(1, 0, specularity) * max(0, dot(normal, normalize(-light_dir)));
+                    float dx = 2 * rand() - 1;
+                    float dy = 2 * rand() - 1;
+
+                    vec3 light_dir = normalize(sun_dir) + (dx * right_dir + dy * up_dir) * sun_size;
+
+                    float sun_time;
+                    int sun_node;
+                    vec3 sun_normal;
+                    bool sun_obstructed = cast_ray(
+                            hit_pos + 1e-5 * normal, normalize(-light_dir),
+                            sun_time, sun_node, sun_normal
+                            );
+
+                    ambient_rays++;
+                    if (!sun_obstructed) {
+                        sample_color += SUN_COLOR * color * blending_factor * mix(1, 0, specularity) * max(0, dot(normal, normalize(-light_dir)));
+                    }
+
+
+                    // === Sample BRDF ===
+                    vec3 reflection = reflect(ray_dir, normal);
+                    vec3 reflect_dir = normalize(mix(random_hemisphere(normal), reflection, specularity));
+
+                    sample_color += emmitance * blending_factor;
+                    blending_factor *= color * dot(normal, reflect_dir);
+
+                    ray_origin = hit_pos + 1e-5 * normal;
+                    ray_dir = reflect_dir;
                 }
-
-
-                // === Sample BRDF ===
-                vec3 reflection = reflect(ray_dir, normal);
-                vec3 reflect_dir = normalize(mix(random_hemisphere(normal), reflection, specularity));
-
-                sample_color += emmitance * blending_factor;
-                blending_factor *= color * mix(2, 1, specularity) * dot(normal, reflect_dir);
-
-                ray_origin = hit_pos + 1e-5 * normal;
-                ray_dir = reflect_dir;
-
             } else {
                 if (bounce == 0) {
                     blending_factor = vec3(1);
@@ -374,11 +386,13 @@ void main() {
                     1.0 / pow(sun_size, 2)
                 );
                 sample_color += (sky_color.rgb + SUN_COLOR * sun_power) * blending_factor;
-                // break;
+                break;
             }
         }
 
-        out_color += sample_color / ambient_rays;
+        if (ambient_rays > 0) {
+            out_color += sample_color / ambient_rays;
+        }
     }
 
     out_color /= MAX_SAMPLES;
