@@ -9,48 +9,35 @@ layout(binding = 0) uniform sampler near_sampler;
 // A: blending to be used for this frame
 layout(binding = 1) uniform texture2D old_color_blend;
 
-// RGB: color in previous frame
-// A: blending to be used for this frame
-layout(binding = 2) uniform texture2D old_specular_blend;
-
-
 // RGB: color in current frame
-layout(rgba32f, binding = 3) uniform readonly image2D sampled_color;
-
-// RGB: specular color in current frame
-layout(rgba32f, binding = 4) uniform readonly image2D sampled_specular;
+layout(rgba32f, binding = 2) uniform readonly image2D sampled_color;
 
 // RGB: blended color for current frame
 // A: blending to be used for the next frame
-layout(rgba32f, binding = 5) uniform writeonly image2D new_color;
-
-// RGB: blended specular color for current frame
-// A: blending to be used for the next frame
-layout(rgba32f, binding = 6) uniform writeonly image2D new_specular;
-
+layout(rgba32f, binding = 3) uniform writeonly image2D new_color;
 
 // XYZ: normal in previous frame
 // W: depth in previous frame
-layout(binding = 7) uniform texture2D old_normals_depths;
+layout(binding = 4) uniform texture2D old_normals_depths;
 
 // XYZ: normal in current frame
 // W: depth in current frame
-layout(rgba32f, binding = 8) uniform readonly image2D new_normals_depths;
+layout(rgba32f, binding = 5) uniform readonly image2D new_normals_depths;
 
-layout(binding = 9) uniform temporal_uniforms {
+layout(binding = 6) uniform temporal_uniforms {
     float sample_blending;
     float maximum_blending;
     float blending_distance_cutoff;
 };
 
-layout(binding = 10) uniform camera_uniforms {
+layout(binding = 7) uniform camera_uniforms {
     vec4 camera_origin;
     vec4 camera_right;
     vec4 camera_up;
     vec4 camera_forward;
 };
 
-layout(binding = 11) uniform old_camera_uniforms {
+layout(binding = 8) uniform old_camera_uniforms {
     vec4 old_camera_origin;
     vec4 old_camera_right;
     vec4 old_camera_up;
@@ -62,8 +49,7 @@ void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
 
     // Get the sampled color of the current pixel
-    vec4 new_sample = imageLoad(sampled_color, coord);
-    vec4 sample_specular = imageLoad(sampled_specular, coord);
+    vec3 color = imageLoad(sampled_color, coord).rgb;
 
     // Get the position used to sample the pixel in the current frame
     vec4 new_normal_depth = imageLoad(new_normals_depths, coord);
@@ -83,13 +69,6 @@ void main() {
     vec4 old_color = vec4(0);
     float blending = 1;
 
-    vec4 old_specular = vec4(0);
-    float blending_specular = 1;
-
-    vec3 debug_color = vec3(0);
-
-    ivec2 size = textureSize(sampler2D(old_color_blend, near_sampler), 0);
-
     // Check if the current pixel hit some geometry
     if (depth >= 0) {
         // Convert world coordinates to pixel coordinates in previous frame
@@ -106,6 +85,7 @@ void main() {
         old_screen.xy /= old_screen.z; // Perspective division
 
         // Get pixel coordinate in normalized coordinate space
+        ivec2 size = textureSize(sampler2D(old_color_blend, near_sampler), 0);
         vec2 tex_coord = (old_screen.xy + vec2(0.5, -0.5)) * vec2(1.0 / (size.x), -1.0 / (size.y));
 
         // Sample from the old frame, if the pixel exists in it
@@ -136,68 +116,11 @@ void main() {
                 blending = old_color.a;
             }
         }
-
-        // If the specular ray hit
-        float specular_time = sample_specular.w;
-        if (specular_time >= 0) {
-            vec3 reflection_pos = world_pos + ray_dir * specular_time;
-
-            // float old_camera_dist = dot(old_camera_origin.xyz - world_pos, normal);
-            // float reflection_dist = dot(reflection_pos - world_pos, normal);
-            //
-            // float wall_factor = old_camera_dist / (old_camera_dist + reflection_dist);
-            // vec3 wall_average = mix(reflection_pos, old_camera_origin.xyz, wall_factor);
-            // vec3 old_wall_pos = wall_average - dot(wall_average, normal) * normal;
-
-            old_screen = old_world_to_screen * vec4(reflection_pos, 1);
-            old_screen.xy /= old_screen.z; // Perspective division
-
-            // Get pixel coordinate in normalized coordinate space
-            tex_coord = (old_screen.xy + vec2(0.5, -0.5)) * vec2(1.0 / (size.x), -1.0 / (size.y));
-
-            // Sample from the old frame, if the pixel exists in it
-            if (0 <= tex_coord.x && tex_coord.x <= 1 && 0 <= tex_coord.y && tex_coord.y <= 1) {
-                // Get the position used to sample the pixel in the previous frame
-                vec4 old_normal_depth = texture(sampler2D(old_normals_depths, near_sampler), tex_coord);
-
-                // vec3 old_normal = old_normal_depth.xyz;
-                float old_depth = old_normal_depth.w;
-
-                vec3 old_ray_dir = normalize(
-                        int(old_screen.x + 0.5) * old_camera_right.xyz 
-                        + int(old_screen.y - 0.5) * old_camera_up.xyz 
-                        + old_camera_forward.xyz
-                        );
-                vec3 old_position = old_camera_origin.xyz + old_depth * old_ray_dir;
-
-                // Direction from the surface to the camera.
-                vec3 camera_dir = normalize(camera_origin.xyz - world_pos);
-
-                float bias = max(0.1, dot(camera_dir, normal));
-                // float dist = distance(old_position, old_wall_pos);
-
-                // Only sample from pixels if the new pixel is close to the location in the previous frame
-                // bool same_position = bias * dist < blending_distance_cutoff * depth;
-                // if (same_position) {
-                    old_specular = texture(sampler2D(old_specular_blend, near_sampler), tex_coord); 
-                    blending_specular = old_specular.a;
-                    debug_color = old_specular.rgb;
-                    debug_color = vec3(specular_time / 2e1);
-                // }
-            }
-        }
     }
 
-    vec3 blended_color = mix(old_color.rgb, new_sample.rgb, blending);
-    vec3 blended_specular = mix(old_specular.rgb, sample_specular.rgb, blending_specular);
-
+    vec3 blended_color = depth >= 0 ? mix(old_color.rgb, color, blending) : color;
     float next_blending = clamp((1 - sample_blending) * blending, 1 - maximum_blending, 1);
-    float next_blending_specular = clamp((1 - sample_blending) * blending_specular, 1 - maximum_blending, 1);
-
-    // imageStore(new_color, coord, vec4(debug_color, next_blending));
-    // imageStore(new_specular, coord, vec4(debug_color, next_blending_specular));
 
     imageStore(new_color, coord, vec4(blended_color, next_blending));
-    imageStore(new_specular, coord, vec4(blended_specular, next_blending_specular));
 }
 

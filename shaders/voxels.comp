@@ -25,10 +25,8 @@ layout(rgba32f, binding = 1) uniform writeonly image2D new_normals_depths;
 // RGB: color of the first surface hit
 layout(rgba32f, binding = 2) uniform writeonly image2D albedo;
 
-// RGB: color of specular ray entering this pixel
-layout(rgba32f, binding = 3) uniform writeonly image2D specular;
 
-layout(binding = 4) uniform uniforms {
+layout(binding = 3) uniform uniforms {
     vec4 camera_origin;
     vec4 camera_right;
     vec4 camera_up;
@@ -51,14 +49,14 @@ layout(binding = 4) uniform uniforms {
     float specularity;
 };
 
-layout(binding = 5) uniform old_uniforms {
+layout(binding = 4) uniform old_uniforms {
     vec4 old_camera_origin;
     vec4 old_camera_right;
     vec4 old_camera_up;
     vec4 old_camera_forward;
 };
 
-layout(binding = 6) readonly buffer octree_data {
+layout(binding = 5) readonly buffer octree_data {
     vec3 root_center;
     float root_size;
     float child_size;
@@ -69,7 +67,7 @@ layout(binding = 6) readonly buffer octree_data {
 #define BLUE_NOISE_COUNT 512
 #define BLUE_NOISE_BUFFER_SIZE (BLUE_NOISE_SIZE * BLUE_NOISE_SIZE * BLUE_NOISE_COUNT)
 
-layout(binding = 7) readonly buffer randomness {
+layout(binding = 6) readonly buffer randomness {
     float blue_noise[BLUE_NOISE_BUFFER_SIZE];
 };
 
@@ -287,25 +285,20 @@ vec3 random_hemisphere(vec3 normal) {
     reflect_dir.z = plane_radius * sin(phi);
 
     reflect_dir -= normal * min(0, 2 * dot(normal, reflect_dir));
-    return normalize(reflect_dir);
+    return reflect_dir;
 }
 
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
 
     vec3 out_color = vec3(0);
-    vec3 out_specularity = vec3(0);
-
     vec3 first_normal = vec3(ALMOST_INFINITY);
     float first_time = -1;
     int first_node = 0xffffff;
 
-    bool is_specular = false;
-    float specular_time = ALMOST_INFINITY;
-
     vec3 sun_dir = vec3(cos(sun_yaw) * cos(sun_pitch), -sin(sun_pitch), sin(sun_yaw) * cos(sun_pitch));
 
-    for (int sampl = 0; sampl < 2; sampl++) {
+    for (int sampl = 0; sampl < MAX_SAMPLES; sampl++) {
         vec3 ray_origin = camera_origin.xyz;
         vec3 ray_dir = normalize(
             (coord.x) * camera_right.xyz 
@@ -332,26 +325,14 @@ void main() {
                     first_node = node;
                     first_normal = normal;
                     first_time = time;
-                } 
-                if (bounce == 1 && sampl==1) {
-                    specular_time = time;
                 }
 
-                if (sampl == 1 && (bounce == 0 || rand() < specularity)) {
-                    if ((node & EMMITANCE_BIT) != 0) {
-                        break;
-                    }
-
-                    if (bounce == 0) {
-                        is_specular = true;
-                        blending_factor *= specularity;
-                    }
-
+                if (rand() < specularity) {
                     // specular
                     vec3 reflect_dir = normalize(reflect(ray_dir, normal));
 
                     sample_color += emmitance * blending_factor;
-                    blending_factor *= color * dot(reflect_dir, normal);
+                    blending_factor *= 2 * color * dot(reflect_dir, normal);
 
                     ray_origin = hit_pos + 1e-5 * normal;
                     ray_dir = reflect_dir;
@@ -378,12 +359,13 @@ void main() {
 
                     ambient_rays++;
                     if (!sun_obstructed) {
-                        sample_color += SUN_COLOR * color * blending_factor * max(0, dot(normal, normalize(-light_dir)));
+                        sample_color += SUN_COLOR * color * blending_factor * mix(1, 0, specularity) * max(0, dot(normal, normalize(-light_dir)));
                     }
 
 
                     // === Sample BRDF ===
-                    vec3 reflect_dir = random_hemisphere(normal);
+                    vec3 reflection = reflect(ray_dir, normal);
+                    vec3 reflect_dir = normalize(mix(random_hemisphere(normal), reflection, specularity));
 
                     sample_color += emmitance * blending_factor;
                     blending_factor *= color * dot(normal, reflect_dir);
@@ -409,19 +391,15 @@ void main() {
         }
 
         if (ambient_rays > 0) {
-            if (sampl == 0) {
-                out_color += sample_color / ambient_rays;
-            } else {
-                out_specularity += sample_color / ambient_rays;
-            }
+            out_color += sample_color / ambient_rays;
         }
     }
+
+    out_color /= MAX_SAMPLES;
 
     vec3 albedo_color = (first_node & EMMITANCE_BIT) == 0 ? node_color(first_node) : vec3(1);
 
     imageStore(output_color, coord, vec4(out_color, 1));
-    imageStore(specular, coord, vec4(out_specularity, specular_time));
-
     imageStore(new_normals_depths, coord, vec4(first_normal, first_time));
     imageStore(albedo, coord, vec4(albedo_color, intBitsToFloat(first_node)));
 }
