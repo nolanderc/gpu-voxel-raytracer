@@ -169,6 +169,7 @@ struct Bindings {
     gui_texture: GuiTexture,
     near_sampler: wgpu::Sampler,
     albedo: wgpu::Texture,
+    specular: wgpu::Texture,
 }
 
 struct UniformBuffer<T> {
@@ -264,7 +265,7 @@ struct GBuffer {
     size: crate::Size,
     color: wgpu::Texture,
     normal_depth: wgpu::Texture,
-    normal: wgpu::Texture,
+    specular: wgpu::Texture,
 }
 
 struct BindGroups {
@@ -513,7 +514,17 @@ impl Context {
             .context("failed to find compatible graphics adapter")?;
 
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: None,
+                    features: wgpu::Features::default(),
+                    limits: wgpu::Limits {
+                        max_storage_textures_per_shader_stage: 5,
+                        ..Default::default()
+                    },
+                },
+                None,
+            )
             .await
             .context("failed to find device")?;
 
@@ -783,6 +794,7 @@ impl Context {
 
         let sampled_color = create_color_texture();
         let albedo = create_color_texture();
+        let specular = create_color_texture();
         let denoised_color = create_color_texture();
 
         let denoise_uniforms = UniformBuffer::new(gpu, DenoiseUniforms::default());
@@ -834,6 +846,7 @@ impl Context {
             temporal_uniforms,
 
             albedo,
+            specular,
             sampled_color,
             denoised_color,
 
@@ -945,16 +958,18 @@ impl Context {
     fn create_voxel_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
         let sampled_color = util::view(&bindings.sampled_color);
         let albedo = util::view(&bindings.albedo);
+        let specular = util::view(&bindings.specular);
         let new_normal_depth = util::view(&bindings.new_g_buffer.normal_depth);
 
         let (layout, bindings) = bind_group![
             UniformImage(0 => (&sampled_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(1 => (&new_normal_depth, WriteOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
             UniformImage(2 => (&albedo, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            Uniform(3 => (&bindings.uniform_buffer) in COMPUTE),
-            Uniform(4 => (&bindings.old_uniform_buffer) in COMPUTE),
-            Storage(5 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
-            Storage(6 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
+            UniformImage(3 => (&specular, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            Uniform(4 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(5 => (&bindings.old_uniform_buffer) in COMPUTE),
+            Storage(6 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
+            Storage(7 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -964,26 +979,34 @@ impl Context {
         let old_images = &bindings.old_g_buffer;
         let old_color = util::view(&old_images.color);
         let old_normal_depth = util::view(&old_images.normal_depth);
+        let old_specular = util::view(&old_images.specular);
 
         let new_images = &bindings.new_g_buffer;
         let new_color = util::view(&new_images.color);
         let new_normal_depth = util::view(&new_images.normal_depth);
+        let new_specular = util::view(&new_images.specular);
 
         let sampled_color = util::view(&bindings.sampled_color);
+        let sampled_specular = util::view(&bindings.specular);
 
         let (layout, bindings) = bind_group![
             Sampler(0 => (&bindings.near_sampler) in COMPUTE),
 
             Texture(1 => (&old_color, Float { filterable: true }, D2) in COMPUTE),
-            UniformImage(2 => (&sampled_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            UniformImage(3 => (&new_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            Texture(2 => (&old_specular, Float { filterable: true }, D2) in COMPUTE),
 
-            Texture(4 => (&old_normal_depth, Float { filterable: true }, D2) in COMPUTE),
-            UniformImage(5 => (&new_normal_depth, ReadOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
+            UniformImage(3 => (&sampled_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            UniformImage(4 => (&sampled_specular, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
 
-            Uniform(6 => (&bindings.temporal_uniforms.buffer) in COMPUTE),
-            Uniform(7 => (&bindings.uniform_buffer) in COMPUTE),
-            Uniform(8 => (&bindings.old_uniform_buffer) in COMPUTE),
+            UniformImage(5 => (&new_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            UniformImage(6 => (&new_specular, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+
+            Texture(7 => (&old_normal_depth, Float { filterable: true }, D2) in COMPUTE),
+            UniformImage(8 => (&new_normal_depth, ReadOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
+
+            Uniform(9 => (&bindings.temporal_uniforms.buffer) in COMPUTE),
+            Uniform(10 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(11 => (&bindings.old_uniform_buffer) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -994,14 +1017,16 @@ impl Context {
         let new_color = util::view(&bindings.new_g_buffer.color);
         let new_normal_depth = util::view(&bindings.new_g_buffer.normal_depth);
         let albedo = util::view(&bindings.albedo);
+        let specular = util::view(&bindings.new_g_buffer.specular);
 
         let (layout, bindings) = bind_group![
             UniformImage(0 => (&denoise_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(1 => (&new_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(2 => (&new_normal_depth, ReadOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
             UniformImage(3 => (&albedo, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            Uniform(4 => (&bindings.uniform_buffer) in COMPUTE),
-            Uniform(5 => (&bindings.denoise_uniforms.buffer) in COMPUTE),
+            UniformImage(4 => (&specular, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            Uniform(5 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(6 => (&bindings.denoise_uniforms.buffer) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -1240,6 +1265,7 @@ impl Context {
 
         self.bindings.sampled_color = create_color_texture(&self.gpu);
         self.bindings.albedo = create_color_texture(&self.gpu);
+        self.bindings.specular = create_color_texture(&self.gpu);
         self.bindings.denoised_color = create_color_texture(&self.gpu);
 
         self.bindings.gui_uniforms.write(
@@ -1983,18 +2009,17 @@ impl DirectoryWatcher {
 impl GBuffer {
     pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
     pub const NORMAL_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
-    pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
     fn new(gpu: &GpuContext, size: crate::Size) -> GBuffer {
         let color = Self::create_storage_texture(size, GBuffer::COLOR_FORMAT, gpu);
         let normal_depth = Self::create_storage_texture(size, GBuffer::NORMAL_DEPTH_FORMAT, gpu);
-        let normal = Self::create_storage_texture(size, GBuffer::NORMAL_FORMAT, gpu);
+        let specular = Self::create_storage_texture(size, GBuffer::COLOR_FORMAT, gpu);
 
         GBuffer {
             size,
             color,
             normal_depth,
-            normal,
+            specular,
         }
     }
 
@@ -2020,6 +2045,6 @@ impl GBuffer {
             self.size,
             encoder,
         );
-        util::copy_entire_texture_to_texture(&other.normal, &self.normal, self.size, encoder);
+        util::copy_entire_texture_to_texture(&other.specular, &self.specular, self.size, encoder);
     }
 }
