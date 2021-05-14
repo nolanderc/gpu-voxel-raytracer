@@ -106,11 +106,11 @@ void main() {
             // Direction from the surface to the camera.
             vec3 camera_dir = normalize(camera_origin.xyz - world_pos);
 
-            float bias = max(0.1, dot(camera_dir, normal));
+            float bias = max(0, dot(camera_dir, normal));
             float dist = distance(old_position, world_pos);
 
             // Only sample from pixels if the new pixel is close to the location in the previous frame
-            bool same_position = bias * dist < blending_distance_cutoff * depth;
+            bool same_position = dist < bias * blending_distance_cutoff * depth;
             if (same_position) {
                 old_color = texture(sampler2D(old_color_blend, near_sampler), tex_coord); 
                 blending = old_color.a;
