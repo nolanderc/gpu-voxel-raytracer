@@ -130,7 +130,7 @@ void main() {
             float dist = distance(old_position, world_pos);
 
             // Only sample from pixels if the new pixel is close to the location in the previous frame
-            bool same_position = bias * dist < blending_distance_cutoff * depth;
+            bool same_position = dist < blending_distance_cutoff * depth;
             if (same_position) {
                 old_color = texture(sampler2D(old_color_blend, near_sampler), tex_coord); 
                 blending = old_color.a;
@@ -139,15 +139,8 @@ void main() {
 
         // If the specular ray hit
         float specular_time = sample_specular.w;
-        if (specular_time >= 0) {
+        if (specular_time > 0) {
             vec3 reflection_pos = world_pos + ray_dir * specular_time;
-
-            // float old_camera_dist = dot(old_camera_origin.xyz - world_pos, normal);
-            // float reflection_dist = dot(reflection_pos - world_pos, normal);
-            //
-            // float wall_factor = old_camera_dist / (old_camera_dist + reflection_dist);
-            // vec3 wall_average = mix(reflection_pos, old_camera_origin.xyz, wall_factor);
-            // vec3 old_wall_pos = wall_average - dot(wall_average, normal) * normal;
 
             old_screen = old_world_to_screen * vec4(reflection_pos, 1);
             old_screen.xy /= old_screen.z; // Perspective division
@@ -181,8 +174,6 @@ void main() {
                 // if (same_position) {
                     old_specular = texture(sampler2D(old_specular_blend, near_sampler), tex_coord); 
                     blending_specular = old_specular.a;
-                    debug_color = old_specular.rgb;
-                    debug_color = vec3(specular_time / 2e1);
                 // }
             }
         }
@@ -193,9 +184,6 @@ void main() {
 
     float next_blending = clamp((1 - sample_blending) * blending, 1 - maximum_blending, 1);
     float next_blending_specular = clamp((1 - sample_blending) * blending_specular, 1 - maximum_blending, 1);
-
-    // imageStore(new_color, coord, vec4(debug_color, next_blending));
-    // imageStore(new_specular, coord, vec4(debug_color, next_blending_specular));
 
     imageStore(new_color, coord, vec4(blended_color, next_blending));
     imageStore(new_specular, coord, vec4(blended_specular, next_blending_specular));

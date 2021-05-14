@@ -1,8 +1,7 @@
 #version 450
 
 #define MAX_DEPTH 16
-#define MAX_BOUNCES 4
-#define MAX_SAMPLES 1
+#define MAX_BOUNCES 3
 
 #define SUN_COLOR (sun_strength * sun_color.rgb)
 
@@ -195,10 +194,8 @@ bool cast_bounded_ray(
 
         uint directional_octant = octant ^ dir_mask;
         bvec3 locked = bvec3(directional_octant & 4, directional_octant & 2, directional_octant & 1);
-        bvec3 ahead = greaterThanEqual(t_mid, vec3(time));
 
-        vec3 mid_intersect = vec3(not(ahead)) * t_mid + vec3(ahead) * vec3(ALMOST_INFINITY);
-        mid_intersect = vec3(not(locked)) * t_mid + vec3(locked) * vec3(ALMOST_INFINITY);
+        vec3 mid_intersect = mix(t_mid, vec3(ALMOST_INFINITY), locked);
 
         float next_time = min(min(mid_intersect.x, mid_intersect.y), mid_intersect.z);
         bvec3 plane = equal(mid_intersect, vec3(next_time));
@@ -273,6 +270,7 @@ vec3 node_emmitance(int node) {
 uint random_index = gl_GlobalInvocationID.x % BLUE_NOISE_SIZE 
     + (gl_GlobalInvocationID.y % BLUE_NOISE_SIZE) * BLUE_NOISE_SIZE
     + (frame_number % BLUE_NOISE_COUNT) * BLUE_NOISE_SIZE * BLUE_NOISE_SIZE;
+
 float rand() {
     random_index = (random_index + BLUE_NOISE_SIZE * BLUE_NOISE_SIZE) % BLUE_NOISE_BUFFER_SIZE;
     return blue_noise[random_index];
@@ -305,60 +303,60 @@ void main() {
 
     vec3 sun_dir = vec3(cos(sun_yaw) * cos(sun_pitch), -sin(sun_pitch), sin(sun_yaw) * cos(sun_pitch));
 
-    for (int sampl = 0; sampl < 2; sampl++) {
-        vec3 ray_origin = camera_origin.xyz;
-        vec3 ray_dir = normalize(
+    vec3 ray_origin = camera_origin.xyz;
+    vec3 ray_dir = normalize(
             (coord.x) * camera_right.xyz 
             - (coord.y) * camera_up.xyz 
             + camera_forward.xyz
-        );
+            );
 
-        vec3 sample_color = vec3(0);
-        vec3 blending_factor = vec3(1);
-        uint ambient_rays = 0;
+    vec3 sample_color = vec3(0);
+    vec3 blending_factor = vec3(1);
+    uint ambient_rays = 0;
 
-        for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
-            float time;
-            int node;
-            vec3 normal;
-            if (cast_ray(ray_origin, ray_dir, time, node, normal)) {
-                vec3 hit_pos = ray_origin + ray_dir * time;
+    for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+        float time;
+        int node;
+        vec3 normal;
+        if (cast_ray(ray_origin, ray_dir, time, node, normal)) {
+            vec3 hit_pos = ray_origin + ray_dir * time;
 
-                // we handle the first bounce's color seperately as albedo
-                vec3 color = bounce == 0 ? vec3(1) : node_color(node);
-                vec3 emmitance = node_emmitance(node);
+            // we handle the first bounce's color seperately as albedo
+            vec3 color = bounce == 0 ? vec3(1) : node_color(node);
+            vec3 emmitance = node_emmitance(node);
 
-                if (bounce == 0) {
-                    first_node = node;
-                    first_normal = normal;
-                    first_time = time;
-                } 
-                if (bounce == 1 && sampl==1) {
-                    specular_time = time;
+            if (bounce == 0) {
+                first_node = node;
+                first_normal = normal;
+                first_time = time;
+            } 
+            if (bounce == 1 && is_specular) {
+                specular_time = time;
+            }
+
+            if (rand() < specularity) {
+                if ((node & EMMITANCE_BIT) != 0) {
+                    break;
                 }
 
-                if (sampl == 1 && (bounce == 0 || rand() < specularity)) {
-                    if ((node & EMMITANCE_BIT) != 0) {
-                        break;
-                    }
+                if (bounce == 0) {
+                    is_specular = true;
+                    // blending_factor *= specularity;
+                }
 
-                    if (bounce == 0) {
-                        is_specular = true;
-                        blending_factor *= specularity;
-                    }
+                // specular
+                vec3 reflect_dir = normalize(reflect(ray_dir, normal));
 
-                    // specular
-                    vec3 reflect_dir = normalize(reflect(ray_dir, normal));
+                sample_color += emmitance * blending_factor;
+                blending_factor *= color * dot(reflect_dir, normal);
 
-                    sample_color += emmitance * blending_factor;
-                    blending_factor *= color * dot(reflect_dir, normal);
+                ray_origin = hit_pos + 1e-5 * normal;
+                ray_dir = reflect_dir;
+            } else {
+                // diffuse
 
-                    ray_origin = hit_pos + 1e-5 * normal;
-                    ray_dir = reflect_dir;
-                } else {
-                    // diffuse
-
-                    // === Cast sun ray ===
+                // === Cast sun ray ===
+                if (sun_strength > 0) {
                     vec3 rand_dir = vec3(rand(), rand(), rand());
                     vec3 up_dir = normalize(cross(rand_dir, sun_dir));
                     vec3 right_dir = normalize(cross(sun_dir, up_dir));
@@ -380,40 +378,40 @@ void main() {
                     if (!sun_obstructed) {
                         sample_color += SUN_COLOR * color * blending_factor * max(0, dot(normal, normalize(-light_dir)));
                     }
-
-
-                    // === Sample BRDF ===
-                    vec3 reflect_dir = random_hemisphere(normal);
-
-                    sample_color += emmitance * blending_factor;
-                    blending_factor *= color * dot(normal, reflect_dir);
-
-                    ray_origin = hit_pos + 1e-5 * normal;
-                    ray_dir = reflect_dir;
-                }
-            } else {
-                if (bounce == 0) {
-                    blending_factor = vec3(1);
                 }
 
-                // hit the sky
-                ambient_rays++;
 
-                float sun_power = pow(
+                // === Sample BRDF ===
+                vec3 reflect_dir = random_hemisphere(normal);
+
+                sample_color += emmitance * blending_factor;
+                blending_factor *= color * dot(normal, reflect_dir);
+
+                ray_origin = hit_pos + 1e-5 * normal;
+                ray_dir = reflect_dir;
+            }
+        } else {
+            if (bounce == 0) {
+                blending_factor = vec3(1);
+            }
+
+            // hit the sky
+            ambient_rays++;
+
+            float sun_power = pow(
                     max(0, dot(ray_dir, normalize(-sun_dir))), 
                     1.0 / pow(sun_size, 2)
-                );
-                sample_color += (sky_color.rgb + SUN_COLOR * sun_power) * blending_factor;
-                break;
-            }
+                    );
+            sample_color += (sky_color.rgb + SUN_COLOR * sun_power) * blending_factor;
+            break;
         }
+    }
 
-        if (ambient_rays > 0) {
-            if (sampl == 0) {
-                out_color += sample_color / ambient_rays;
-            } else {
-                out_specularity += sample_color / ambient_rays;
-            }
+    if (ambient_rays > 0) {
+        if (is_specular) {
+            out_specularity += sample_color / ambient_rays;
+        } else {
+            out_color += sample_color / ambient_rays;
         }
     }
 
