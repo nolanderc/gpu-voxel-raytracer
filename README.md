@@ -29,3 +29,12 @@ root directory, therefore run them with the following command:
 
 where `OS` corresponds to your operating system.
 
+
+## Building the Shaders
+
+Shaders are compiled from GLSL to SPIR-V if they are out of date. This is done
+using the [`glslValidator` compiler](https://github.com/KhronosGroup/glslang).
+The shaders should be up-to-date when you first open this repository, so
+installing this executable should not be required. However, if you want to edit
+the shaders, make sure that the compiler is installed.
+
