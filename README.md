@@ -1,9 +1,11 @@
 
 # Interactive Voxel Path Tracer
 
-## Building from Soruce
+## Building from Source
 
-Requires Rust 1.50 or later (may work with earlier version, not tested).
+Requires Rust 1.50 or later (may work with earlier version, not tested). Does
+not currently compile on Windows due to missing key bindings, only supported on
+MacOS and Linux.
 
 In order to build and run the executable, run the following command:
 
