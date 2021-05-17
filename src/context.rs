@@ -1043,7 +1043,7 @@ impl Context {
     /// Load blue noise images from disk, and return their size and contents appended in a single
     /// array
     fn load_blue_noise(path: &str) -> anyhow::Result<(usize, Vec<f32>)> {
-        let file = std::fs::File::open(path)?;
+        let file = std::fs::File::open(path).with_context(|| format!("while opening: {}", path))?;
         let mut archive = zip::ZipArchive::new(file)?;
 
         if archive.is_empty() {
