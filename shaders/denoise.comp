@@ -6,16 +6,15 @@ layout(rgba32f, binding = 0) uniform writeonly image2D output_colors;
 layout(rgba32f, binding = 1) uniform readonly image2D colors;
 layout(rgba32f, binding = 2) uniform readonly image2D normals_depths;
 layout(rgba32f, binding = 3) uniform readonly image2D albedo;
-layout(rgba32f, binding = 4) uniform readonly image2D specular;
 
-layout(binding = 5) uniform uniforms {
+layout(binding = 4) uniform uniforms {
     vec4 camera_origin;
     vec4 camera_right;
     vec4 camera_up;
     vec4 camera_forward;
 };
 
-layout(binding = 6) uniform denoise_uniforms {
+layout(binding = 5) uniform denoise_uniforms {
     uint radius;
     float sigma_distance;
     float sigma_range;
@@ -44,7 +43,6 @@ void main() {
     vec4 center_normal_depth = imageLoad(normals_depths, coord);
     vec3 center_albedo = imageLoad(albedo, coord).rgb;
     int center_material = floatBitsToInt(imageLoad(albedo, coord).w);
-    vec3 center_specular = imageLoad(specular, coord).rgb;
 
     float depth_bias = max(0, dot(center_normal_depth.xyz, -ray_dir));
 
@@ -89,7 +87,6 @@ void main() {
 
     vec3 out_color = vec3(0);
     out_color += radius == 0 ? center_color.rgb : sum / normalization;
-    out_color += center_specular;
     out_color = mix(out_color, center_albedo * out_color, albedo_factor);
 
     imageStore(output_colors, coord, vec4(out_color, 1));

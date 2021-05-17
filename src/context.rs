@@ -238,9 +238,6 @@ struct Bindings {
     /// Output of the direct lighting collected by the path-tracer
     sampled_albedo: wgpu::Texture,
 
-    /// Output of the specular lighting collected by the path-tracer
-    sampled_specular: wgpu::Texture,
-
     /// GPU-side parameters that control the temporal blending
     temporal_uniforms: UniformBuffer<TemporalUniforms>,
 
@@ -375,8 +372,6 @@ struct GBuffer {
     /// RGB: Normal of the first surface hit,
     /// A: distance from the camera to the first surface hit
     normal_depth: wgpu::Texture,
-    /// Specular lighting in the previous frame
-    specular: wgpu::Texture,
 }
 
 struct BindGroups {
@@ -489,7 +484,7 @@ impl Default for Uniforms {
             frame_number: 0,
 
             emit_strength: 4.0,
-            sun_strength: 1.0,
+            sun_strength: 4.0,
             sun_size: 0.05,
             sun_yaw: 1.32,
             sun_pitch: 1.0,
@@ -594,6 +589,8 @@ impl FpsCounter {
 
 // Context creation
 impl Context {
+    const BLUE_NOISE_SIZE: usize = 128;
+
     /// Create a new context with the given window.
     pub async fn new(window: Arc<winit::window::Window>) -> anyhow::Result<Context> {
         let gpu = Self::create_gpu_context(&window).await?;
@@ -679,17 +676,7 @@ impl Context {
             .context("failed to find compatible graphics adapter")?;
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: None,
-                    features: wgpu::Features::default(),
-                    limits: wgpu::Limits {
-                        max_storage_textures_per_shader_stage: 5,
-                        ..Default::default()
-                    },
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor::default(), None)
             .await
             .context("failed to find device")?;
 
@@ -851,7 +838,7 @@ impl Context {
     fn create_voxels() -> Vec<([i16; 3], [u8; 4])> {
         let mut voxels = Vec::new();
 
-        let radius = 32i32;
+        let radius = 256i32;
 
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -975,22 +962,11 @@ impl Context {
 
         let sampled_color = create_color_texture();
         let albedo = create_color_texture();
-        let specular = create_color_texture();
         let denoised_color = create_color_texture();
 
         let denoise_uniforms = UniformBuffer::new(gpu, DenoiseUniforms::default());
 
-        let (blue_noise_size, blue_noise_pixels) =
-            Self::load_blue_noise("resources/blue-noise-128.zip")
-                .context("failed to load blue noise")?;
-
-        assert_eq!(
-            blue_noise_size, 128,
-            "blue noise images must have width and height set to 128"
-        );
-
-        let randomness_buffer =
-            Buffer::new(gpu, Usage::STORAGE | Usage::COPY_DST, &blue_noise_pixels);
+        let randomness_buffer = Self::create_blue_noise_buffer(gpu)?;
 
         let gui_uniforms = Buffer::new(
             gpu,
@@ -1027,7 +1003,6 @@ impl Context {
             temporal_uniforms,
 
             sampled_albedo: albedo,
-            sampled_specular: specular,
             sampled_color,
             denoised_color,
 
@@ -1038,6 +1013,28 @@ impl Context {
         };
 
         Ok(bindings)
+    }
+
+    /// Create a buffer with blue noise
+    fn create_blue_noise_buffer(gpu: &GpuContext) -> anyhow::Result<Buffer<f32>> {
+        let (blue_noise_size, blue_noise_pixels) = Self::load_blue_noise(&format!(
+            "resources/blue-noise-{}.zip",
+            Self::BLUE_NOISE_SIZE
+        ))
+        .context("failed to load blue noise")?;
+
+        assert_eq!(
+            blue_noise_size,
+            Self::BLUE_NOISE_SIZE,
+            "blue noise images must have width and height set to {}",
+            Self::BLUE_NOISE_SIZE
+        );
+
+        Ok(Buffer::new(
+            gpu,
+            wgpu::BufferUsage::STORAGE | wgpu::BufferUsage::COPY_DST,
+            &blue_noise_pixels,
+        ))
     }
 
     /// Load blue noise images from disk, and return their size and contents appended in a single
@@ -1143,18 +1140,16 @@ impl Context {
     fn create_voxel_bind_group(gpu: &GpuContext, bindings: &Bindings) -> BindGroup {
         let sampled_color = util::view(&bindings.sampled_color);
         let albedo = util::view(&bindings.sampled_albedo);
-        let specular = util::view(&bindings.sampled_specular);
         let new_normal_depth = util::view(&bindings.new_g_buffer.normal_depth);
 
         let (layout, bindings) = bind_group![
             UniformImage(0 => (&sampled_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(1 => (&new_normal_depth, WriteOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
             UniformImage(2 => (&albedo, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            UniformImage(3 => (&specular, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            Uniform(4 => (&bindings.uniform_buffer) in COMPUTE),
-            Uniform(5 => (&bindings.old_uniform_buffer) in COMPUTE),
-            Storage(6 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
-            Storage(7 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
+            Uniform(3 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(4 => (&bindings.old_uniform_buffer) in COMPUTE),
+            Storage(5 => (&bindings.octree_buffer, read_only: true) in COMPUTE),
+            Storage(6 => (&bindings.randomness_buffer, read_only: true) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -1165,34 +1160,26 @@ impl Context {
         let old_images = &bindings.old_g_buffer;
         let old_color = util::view(&old_images.color);
         let old_normal_depth = util::view(&old_images.normal_depth);
-        let old_specular = util::view(&old_images.specular);
 
         let new_images = &bindings.new_g_buffer;
         let new_color = util::view(&new_images.color);
         let new_normal_depth = util::view(&new_images.normal_depth);
-        let new_specular = util::view(&new_images.specular);
 
         let sampled_color = util::view(&bindings.sampled_color);
-        let sampled_specular = util::view(&bindings.sampled_specular);
 
         let (layout, bindings) = bind_group![
             Sampler(0 => (&bindings.near_sampler) in COMPUTE),
 
             Texture(1 => (&old_color, Float { filterable: true }, D2) in COMPUTE),
-            Texture(2 => (&old_specular, Float { filterable: true }, D2) in COMPUTE),
+            UniformImage(2 => (&sampled_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            UniformImage(3 => (&new_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
 
-            UniformImage(3 => (&sampled_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            UniformImage(4 => (&sampled_specular, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
+            Texture(4 => (&old_normal_depth, Float { filterable: true }, D2) in COMPUTE),
+            UniformImage(5 => (&new_normal_depth, ReadOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
 
-            UniformImage(5 => (&new_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            UniformImage(6 => (&new_specular, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-
-            Texture(7 => (&old_normal_depth, Float { filterable: true }, D2) in COMPUTE),
-            UniformImage(8 => (&new_normal_depth, ReadOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
-
-            Uniform(9 => (&bindings.temporal_uniforms.buffer) in COMPUTE),
-            Uniform(10 => (&bindings.uniform_buffer) in COMPUTE),
-            Uniform(11 => (&bindings.old_uniform_buffer) in COMPUTE),
+            Uniform(6 => (&bindings.temporal_uniforms.buffer) in COMPUTE),
+            Uniform(7 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(8 => (&bindings.old_uniform_buffer) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -1204,16 +1191,14 @@ impl Context {
         let new_color = util::view(&bindings.new_g_buffer.color);
         let new_normal_depth = util::view(&bindings.new_g_buffer.normal_depth);
         let albedo = util::view(&bindings.sampled_albedo);
-        let specular = util::view(&bindings.new_g_buffer.specular);
 
         let (layout, bindings) = bind_group![
             UniformImage(0 => (&denoise_color, WriteOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(1 => (&new_color, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
             UniformImage(2 => (&new_normal_depth, ReadOnly, GBuffer::NORMAL_DEPTH_FORMAT, D2) in COMPUTE),
             UniformImage(3 => (&albedo, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            UniformImage(4 => (&specular, ReadOnly, GBuffer::COLOR_FORMAT, D2) in COMPUTE),
-            Uniform(5 => (&bindings.uniform_buffer) in COMPUTE),
-            Uniform(6 => (&bindings.denoise_uniforms.buffer) in COMPUTE),
+            Uniform(4 => (&bindings.uniform_buffer) in COMPUTE),
+            Uniform(5 => (&bindings.denoise_uniforms.buffer) in COMPUTE),
         ];
 
         BindGroup::from_entries(&layout, &bindings, gpu)
@@ -1460,7 +1445,6 @@ impl Context {
 
         self.bindings.sampled_color = create_color_texture(&self.gpu);
         self.bindings.sampled_albedo = create_color_texture(&self.gpu);
-        self.bindings.sampled_specular = create_color_texture(&self.gpu);
         self.bindings.denoised_color = create_color_texture(&self.gpu);
 
         self.bindings.gui_uniforms.write(
@@ -1671,7 +1655,6 @@ impl Context {
 
         Ok(())
     }
-
 }
 
 // Rendering
@@ -1751,18 +1734,10 @@ impl Context {
                         ui.collapsing("sky", |ui| {
                             Self::color_picker_hue(ui, "sky color", &mut uniforms.sky_color);
                         });
-
-                        ui.collapsing("emmision", |ui| {
-                            Self::slider(
-                                ui,
-                                "emit strength",
-                                &mut uniforms.emit_strength,
-                                0.0..=40.0,
-                            );
-                        });
                     });
 
                     ui.collapsing("materials", |ui| {
+                        Self::slider(ui, "emit strength", &mut uniforms.emit_strength, 0.0..=40.0);
                         Self::slider(ui, "specularity", &mut uniforms.specularity, 0.0..=1.0);
                     });
 
@@ -2256,13 +2231,11 @@ impl GBuffer {
     fn new(gpu: &GpuContext, size: crate::Size) -> GBuffer {
         let color = Self::create_storage_texture(size, GBuffer::COLOR_FORMAT, gpu);
         let normal_depth = Self::create_storage_texture(size, GBuffer::NORMAL_DEPTH_FORMAT, gpu);
-        let specular = Self::create_storage_texture(size, GBuffer::COLOR_FORMAT, gpu);
 
         GBuffer {
             size,
             color,
             normal_depth,
-            specular,
         }
     }
 
@@ -2290,6 +2263,5 @@ impl GBuffer {
             self.size,
             encoder,
         );
-        util::copy_entire_texture_to_texture(&other.specular, &self.specular, self.size, encoder);
     }
 }
