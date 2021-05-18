@@ -128,3 +128,69 @@ scancodes! {
         Key0 = 29,
     }
 }
+
+#[cfg(target_os = "windows")]
+scancodes! {
+    pub enum Scancode {
+        Q = 16,
+        W = 17,
+        E = 18,
+        R = 19,
+        T = 20,
+        Y = 21,
+        U = 22,
+        I = 23,
+        O = 24,
+        P = 25,
+
+        A = 30,
+        S = 31,
+        D = 32,
+        F = 33,
+        G = 34,
+        H = 35,
+        J = 36,
+        K = 37,
+        L = 38,
+        
+        Z = 44,
+        X = 45,
+        C = 46,
+        V = 47,
+        B = 48,
+        N = 49,
+        M = 50,
+
+        Escape = 1,
+
+        LeftShift = 42,
+        RightShift = 54,
+
+        LeftControl = 29,
+        RightControl = 57373,
+
+        Space = 57,
+        Tab = 15,
+
+        Return = 28,
+        Back = 14,
+
+        Left = 57419,
+        Up = 57416,
+        Down = 57424,
+        Right = 57421,
+        Home = 57415,
+        End = 57423,
+
+        Key1 = 2,
+        Key2 = 3,
+        Key3 = 4,
+        Key4 = 5,
+        Key5 = 6,
+        Key6 = 7,
+        Key7 = 8,
+        Key8 = 9,
+        Key9 = 10,
+        Key0 = 11,
+    }
+}
