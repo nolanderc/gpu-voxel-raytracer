@@ -1,6 +1,11 @@
 
 # Interactive Voxel Path Tracer
 
+A path tracer which can render realistic lighting in realtime, even on modest hardware. Accumulates light-data for individual pixels over time, and includes a spacial denoiser to reduce artifacts. The following illustrates a [Menger sponge](https://en.wikipedia.org/wiki/Menger_sponge), rendered in realtime on a Mackbook Pro 2018 8GB:
+
+![menger](https://github.com/nolanderc/gpu-voxel-raytracer/assets/16593746/f315f07c-0846-428c-8c29-7b5d8792b5c0)
+
+
 ## Building from Source
 
 Requires Rust 1.50 or later (may work with earlier version, not tested). Does
